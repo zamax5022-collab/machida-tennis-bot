@@ -3,8 +3,6 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
-
-# Selenium関連のインポート
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -16,24 +14,23 @@ app = Flask(__name__)
 # --- LINE設定 ---
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
-
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-
 configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
+@app.route("/", methods=['GET'])
+def health_check():
+    return "OK", 200
+
 def get_driver():
-    """Chromeの起動設定"""
-    print("[Log] Chromeを起動中...")
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1280,1024')
-    # Renderの環境に合わせてパスが通っていることを前提としています
     return webdriver.Chrome(options=chrome_options)
 
 def check_machida_tennis(target_dates):
@@ -43,37 +40,29 @@ def check_machida_tennis(target_dates):
     for target_date in target_dates:
         driver = None
         current_step = "開始前"
-        date_str = target_date.strftime("%m/%d")
-        day_wd = wd_names[target_date.weekday()]
-        
         try:
             driver = get_driver()
-            # 通常の待機は20秒
             wait = WebDriverWait(driver, 20)
             
-            # Step 1: トップページ
+            # Step 1: トップページ（セッション確立）
             current_step = "1.トップページ読み込み"
-            print(f"[Log] {date_str} {current_step}")
+            print(f"[Log] {current_step}", flush=True)
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # Step 2: 高機能検索ボタン
-            current_step = "2.高機能検索ボタン押下"
-            print(f"[Log] {current_step}")
-            high_func_link = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "高機能検索")))
-            driver.execute_script("arguments[0].click();", high_func_link)
-            
-            # Step 3: メインフレーム切り替え（ここを大幅強化）
-            current_step = "3.メインフレーム切り替え（待機強化）"
-            print(f"[Log] {current_step}")
-            # フレームが出現するまで最大30秒粘る
-            wait_frame = WebDriverWait(driver, 30)
-            wait_frame.until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
-            print("[Log] フレームの切り替えに成功しました")
+            # Step 2: 高機能検索への強制遷移
+            # フレーム切り替えを避け、JavaScriptで直接ページを書き換える
+            current_step = "2.高機能検索ページへ直接遷移"
+            print(f"[Log] {current_step}", flush=True)
+            driver.execute_script("location.href='P_A_Select_A.aspx';")
+            time.sleep(5) # 遷移完了を待つ
 
-            # Step 4: 施設選択
-            current_step = "4.施設(テニス)選択"
-            print(f"[Log] {current_step}")
-            labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
+            # Step 3: 施設選択（このページはフレーム内ではなく直接開いているはず）
+            current_step = "3.施設(テニス)選択"
+            print(f"[Log] {current_step}", flush=True)
+            # ページ内に要素があるか確認
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
+            
+            labels = driver.find_elements(By.TAG_NAME, "label")
             target_found = False
             for label in labels:
                 if "テニスコート" in label.text and "コミュニティ" not in label.text:
@@ -83,20 +72,22 @@ def check_machida_tennis(target_dates):
                     target_found = True
             
             if not target_found:
-                raise Exception("テニスコートのチェックボックスが見つかりません")
+                raise Exception("テニスコートの選択肢が見つかりませんでした")
 
-            # Step 5: 検索ボタン
-            current_step = "5.空き照会ボタン押下"
-            print(f"[Log] {current_step}")
+            # Step 4: 検索実行
+            current_step = "4.空き照会ボタン押下"
+            print(f"[Log] {current_step}", flush=True)
             search_btn = driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]")
             driver.execute_script("arguments[0].click();", search_btn)
             
-            # Step 6: カレンダー日付選択
-            current_step = "6.カレンダー日付選択"
-            print(f"[Log] {current_step}")
-            time.sleep(3) # 画面遷移の安定待ち
+            # Step 5: カレンダー日付選択
+            current_step = "5.カレンダー日付選択"
+            print(f"[Log] {current_step}", flush=True)
+            time.sleep(3)
             day_num = str(target_date.day)
-            # 町田市特有の「日付+曜日」が含まれるリンクを探す
+            day_wd = wd_names[target_date.weekday()]
+            date_str = target_date.strftime("%m/%d")
+            
             target_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]//a"
             day_links = driver.find_elements(By.XPATH, target_xpath)
             
@@ -105,63 +96,53 @@ def check_machida_tennis(target_dates):
                 continue
             driver.execute_script("arguments[0].click();", day_links[0])
             
-            # Step 7: 次へ
-            current_step = "7.次へボタン押下"
-            print(f"[Log] {current_step}")
+            # Step 6: 次へ
+            current_step = "6.次へボタン押下"
+            print(f"[Log] {current_step}", flush=True)
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '次へ')]")))
             driver.execute_script("arguments[0].click();", next_btn)
             
-            # Step 8: 結果抽出
-            current_step = "8.詳細データ抽出"
-            print(f"[Log] {current_step}")
-            time.sleep(2)
+            # Step 7: 結果抽出
+            current_step = "7.詳細データ抽出"
+            print(f"[Log] {current_step}", flush=True)
+            time.sleep(3)
             unique_slots = []
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 if "○" in row.text:
-                    # 読みやすいように整形
-                    clean_text = row.text.replace("\n", " ").strip()
-                    unique_slots.append(f"■ {clean_text}")
+                    unique_slots.append(f"■ {row.text.replace('\n', ' ').strip()}")
 
             res = f"【{date_str}({day_wd})】\n" + ("\n".join(unique_slots) if unique_slots else "空きなし")
             all_results.append(res)
-            print(f"[Log] {date_str} 完了")
+            print(f"[Log] {date_str} 完了", flush=True)
 
         except Exception as e:
-            # LINEに返すエラーメッセージを詳細化
-            error_msg = f"エラー発生(Step:{current_step}): {str(e)}"
-            print(f"[Error] {error_msg}")
-            # Stacktraceをログに出力（RenderのLogsで確認可能）
-            print(traceback.format_exc())
-            all_results.append(f"【{date_str}】{error_msg}")
+            error_msg = f"エラー発生(Step:{current_step}): {str(e)[:100]}"
+            print(f"[Error] {error_msg}", flush=True)
+            all_results.append(f"【{target_date.strftime('%m/%d')}】{error_msg}")
         finally:
             if driver:
-                print(f"[Log] {date_str} ブラウザを閉じます")
                 driver.quit()
 
     return "\n\n".join(all_results)
 
-# --- LINE Callback & Handler ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
-    except Exception as e:
-        print(f"Callback Error: {e}")
+    except:
         abort(400)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_msg = event.message.text
-    # 「今日」または「明日」という言葉に反応
     if "今日" not in user_msg and "明日" not in user_msg:
         return
 
     today = datetime.now()
-    # 日本時間への調整が必要な場合は here + timedelta(hours=9)
     target_dates = [today] if "今日" in user_msg else [today + timedelta(days=1)]
     
     result = check_machida_tennis(target_dates)
@@ -173,6 +154,4 @@ def handle_message(event):
         )
 
 if __name__ == "__main__":
-    # Renderのポート指定に対応
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
