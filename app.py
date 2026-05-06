@@ -17,7 +17,6 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# --- LINE設定 (RenderのEnvironmentで設定済み) ---
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -25,22 +24,21 @@ configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
 def get_driver():
-    """メモリを節約しつつブラウザを起動"""
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--window-size=1280,1024') # 画面サイズを固定して安定化
     return webdriver.Chrome(options=chrome_options)
 
 def check_machida_tennis(target_dates):
-    """町田市の複雑なサイト構造を解析する"""
     wd_names = ["月", "火", "水", "木", "金", "土", "日"]
     all_results = []
 
     for target_date in target_dates:
         driver = get_driver()
-        wait = WebDriverWait(driver, 20) # 20秒まで待機を許可
+        wait = WebDriverWait(driver, 25) # 待機時間を25秒に延長
         
         day_num = str(target_date.day)
         day_wd = wd_names[target_date.weekday()]
@@ -51,21 +49,18 @@ def check_machida_tennis(target_dates):
         current_hour = datetime.now().hour if target_date.date() == datetime.now().date() else -1
 
         try:
+            print(f"Searching for {date_str}...")
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # 高機能検索をクリック
+            # 高機能検索
             wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "高機能検索"))).click()
-            time.sleep(4) 
             
-            # フレーム切り替え：町田市サイトの核となる「MainFrame」へ
-            try:
-                # 確実性を高めるため、インデックス[1]または名前で切り替え
-                wait.until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
-            except:
-                driver.switch_to.frame(1)
+            # フレーム切り替えをより慎重に
+            time.sleep(3)
+            wait.until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
 
-            # 施設選択：テニスコートを探してチェック
-            checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            # 施設選択
+            checkboxes = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "input[type='checkbox']")))
             for cb in checkboxes:
                 try:
                     label = driver.find_element(By.XPATH, f"//label[@for='{cb.get_attribute('id')}']")
@@ -74,12 +69,12 @@ def check_machida_tennis(target_dates):
                             driver.execute_script("arguments[0].click();", cb)
                 except: continue
 
-            # 空き照会ボタン
+            # 空き照会
             search_btn = driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]")
             driver.execute_script("arguments[0].click();", search_btn)
+            
+            # カレンダー画面での待機
             time.sleep(5)
-
-            # カレンダーから対象日の○または△を探す
             target_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]//a[contains(., '○') or contains(., '△')]"
             day_links = driver.find_elements(By.XPATH, target_xpath)
             
@@ -87,24 +82,21 @@ def check_machida_tennis(target_dates):
                 all_results.append(f"【{date_str}({day_wd})】\n空きなし")
                 continue
 
-            # 最初の○をクリック
             driver.execute_script("arguments[0].click();", day_links[0])
-            time.sleep(3)
-
-            # 次へボタンをクリックして詳細画面へ
-            next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@value, '次へ')]")))
+            
+            # 次へボタン
+            next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '次へ')]")))
             driver.execute_script("arguments[0].click();", next_btn)
+            
+            # 詳細画面解析
             time.sleep(5)
-
-            # 空き枠データの抽出
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 if "○" in row.text:
-                    # 施設名やコート名、時間帯を整形
                     text = row.text.replace("\n", " ").strip()
-                    # 既に過去の時間の枠はスキップ
                     try:
-                        time_part = text.split("～")[0][-2:] # 時間の開始時刻を取得
+                        # 時間帯の開始時刻でフィルタリング
+                        time_part = text.split("～")[0][-2:].strip().replace(":", "")
                         if int(time_part) > current_hour:
                             unique_slots.add(f"■ {text}")
                     except:
@@ -114,7 +106,8 @@ def check_machida_tennis(target_dates):
             all_results.append(res_text)
             
         except Exception as e:
-            all_results.append(f"【{date_str}】検索エラー: サイト混雑または構成変更")
+            print(f"Error during search: {e}") # ログにエラー内容を出力
+            all_results.append(f"【{date_str}】検索エラー: サイト混雑のため再試行してください")
         finally:
             driver.quit()
 
@@ -132,7 +125,6 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    """ユーザーからの言葉に合わせて検索日を決定"""
     user_msg = event.message.text
     today = datetime.now()
     target_dates = []
@@ -151,7 +143,6 @@ def handle_message(event):
     else:
         for key, val in wd_map.items():
             if key in user_msg:
-                # 今日を含まない「次の〇曜日」を計算
                 diff = (val - today.weekday() + 7) % 7
                 days_to_add = diff if diff > 0 else 7
                 target_dates.append(today + timedelta(days=days_to_add))
@@ -159,10 +150,8 @@ def handle_message(event):
 
     if not target_dates: return
 
-    # 解析実行
     result = check_machida_tennis(target_dates)
     
-    # LINEへ返信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
@@ -173,6 +162,5 @@ def handle_message(event):
         )
 
 if __name__ == "__main__":
-    # Renderのデフォルトポート10000を使用
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
