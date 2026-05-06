@@ -9,14 +9,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+app = Flask(__name__)
+
+# LINE設定
+access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, PushMessageRequest, TextMessage
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-
-app = Flask(__name__)
-
-access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
@@ -25,89 +25,96 @@ def get_driver():
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1280,1024')
-    # 町田市のシステムに合わせ、あえて古いブラウザのふりをして安定させます
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    chrome_options.add_argument('--window-size=1920,1080')
     return webdriver.Chrome(options=chrome_options)
 
 def scrap_and_push(user_id, target_date):
     driver = None
-    date_str = target_date.strftime('%Y%m%d')
+    date_str = target_date.strftime('%Y%m%d') # image_76075e.png のリンク判定用
     try:
         driver = get_driver()
         wait = WebDriverWait(driver, 20)
         
-        # 1-4. 検索手順
+        # 1. 画面選択 (image_7607d5.jpg)
         driver.get("https://www.pf489.com/machida/dselect.html")
-        
-        # メインフレームに切り替え（町田市攻略の鍵）
-        time.sleep(3)
-        try:
-            driver.switch_to.frame("MainFrame")
-        except:
-            pass # フレームがない場合はそのまま進む
+        time.sleep(2)
+        try: driver.switch_to.frame("MainFrame")
+        except: pass
 
-        search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., '高機能検索')]")))
+        # 高機能検索をクリック
+        search_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(., '高機能検索')]")))
         driver.execute_script("arguments[0].click();", search_btn)
         
-        time.sleep(5)
-        labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
+        # 2. 高機能検索 (image_76079e.jpg)
+        time.sleep(3)
+        # 「テニスコート」を選択
+        labels = driver.find_elements(By.TAG_NAME, "label")
         for label in labels:
             if "テニスコート" in label.text and "コミュニティ" not in label.text:
-                driver.execute_script("arguments[0].click();", driver.find_element(By.ID, label.get_attribute("for")))
+                cb = driver.find_element(By.ID, label.get_attribute("for"))
+                if not cb.is_selected():
+                    driver.execute_script("arguments[0].click();", cb)
         
-        time.sleep(2)
-        btns = driver.find_elements(By.TAG_NAME, "input")
-        for b in btns:
-            if "空き照会" in (b.get_attribute("value") or ""):
-                driver.execute_script("arguments[0].click();", b)
+        # 空き照会ボタンをクリック
+        time.sleep(1)
+        driver.execute_script("document.querySelector('input[value=\"空き照会\"]').click();")
+
+        # 3. 施設別空き状況 (image_76075e.png)
+        time.sleep(8)
+        # 指定日の「○」または「△」のリンクを探してクリック
+        # image_76075e.png の下部にある __doPostBack を含むリンクを特定
+        found_date = False
+        links = driver.find_elements(By.TAG_NAME, "a")
+        for link in links:
+            href = link.get_attribute("href") or ""
+            text = link.text
+            if date_str in href and ("○" in text or "△" in text):
+                driver.execute_script("arguments[0].click();", link)
+                found_date = True
                 break
-
-        # 5. カレンダー画面で日付をクリック
-        time.sleep(10)
-        js_click = f"var d='{date_str}';var a=document.getElementsByTagName('a');for(var i=0;i<a.length;i++){{if((a[i].getAttribute('href')||'').includes(d)||(a[i].getAttribute('onclick')||'').includes(d)){{a[i].click();break;}}}}"
-        driver.execute_script(js_click)
         
-        # 6. 時間帯別空き状況画面の解析
-        time.sleep(10)
-        slots = []
-        
-        # 画面上の全ての「○」や「△」を探し、その親要素をたどって情報を特定する
-        elements = driver.find_elements(By.XPATH, "//*[contains(text(), '○') or contains(text(), '△')]")
-        
-        for el in elements:
-            try:
-                # この「○」が含まれるテーブル行(tr)を取得
-                row = el.find_element(By.XPATH, "./ancestor::tr[1]")
-                # その行の1番左のセルがコート名
-                court_name = row.find_elements(By.TAG_NAME, "td")[0].text.strip()
-                
-                # その行が含まれるテーブルの直近にある施設名を取得
-                table = el.find_element(By.XPATH, "./ancestor::table[1]")
-                park_name = table.find_element(By.XPATH, "./preceding::a[contains(@id, 'LnkSisetu名')][1]").text.strip()
-                
-                # 何番目の列かによって時間を特定（少し強引ですが確実な方法）
-                cell_index = el.find_element(By.XPATH, "./ancestor::td[1]").get_attribute("cellIndex")
-                # 列番号から時間を推測（町田市の標準レイアウト）
-                times = ["9-11", "11-13", "13-15", "15-17", "17-19", "19-21"]
-                time_label = times[int(cell_index)-1] if 0 < int(cell_index) <= len(times) else "不明な時間"
-                
-                slots.append(f"📍{park_name}\n   └ {court_name}：{time_label}")
-            except:
-                continue
-
-        if slots:
-            unique_slots = list(dict.fromkeys(slots))
-            final_msg = f"🎾 {target_date.strftime('%m/%d')}の空きを発見！\n\n" + "\n".join(unique_slots)
+        if not found_date:
+            final_msg = f"📅 {target_date.strftime('%m/%d')}は、施設別一覧で空き（○/△）が見つかりませんでした。"
         else:
-            final_msg = f"📅 {target_date.strftime('%m/%d')}は、詳細画面でも空きが見つかりませんでした。"
-        
+            # 4. 時間帯別空き状況 (image_760471.png)
+            time.sleep(8)
+            slots = []
+            
+            # 画面内の全てのテーブルをループ
+            tables = driver.find_elements(By.XPATH, "//table[contains(@id, 'dlJikantai')]")
+            for table in tables:
+                try:
+                    # 施設名を取得 (テーブルの直前にある a タグ)
+                    park_name = table.find_element(By.XPATH, "./preceding::a[contains(@id, 'LnkSisetu名')][1]").text.strip()
+                    
+                    # 時間帯のヘッダーを取得 (tr[2]のth列)
+                    time_headers = [th.text.replace("\n", "") for th in table.find_elements(By.XPATH, ".//tr[2]/th")]
+                    
+                    # 各「面」(A面、B面など)の行をスキャン
+                    rows = table.find_elements(By.XPATH, ".//tr[position()>2]")
+                    for row in rows:
+                        cells = row.find_elements(By.TAG_NAME, "td")
+                        if not cells: continue
+                        
+                        court_name = cells[0].text.strip() # 例: A面
+                        for i, cell in enumerate(cells[1:], 1):
+                            if "○" in cell.text or "△" in cell.text:
+                                time_range = time_headers[i] if i < len(time_headers) else f"枠{i}"
+                                slots.append(f"📍{park_name}【{court_name}】\n   └ {time_range}")
+                except:
+                    continue
+
+            if slots:
+                final_msg = f"🎾 {target_date.strftime('%m/%d')}の空きを発見！\n\n" + "\n\n".join(list(dict.fromkeys(slots)))
+            else:
+                final_msg = f"📅 {target_date.strftime('%m/%d')}：詳細画面に遷移しましたが、空き枠の読み取りに失敗しました。"
+
     except Exception as e:
-        final_msg = f"⚠️ 取得エラー\n詳細: {str(e)[:100]}"
+        final_msg = f"⚠️ エラーが発生しました\n内容: {str(e)[:100]}"
     finally:
         if driver: driver.quit()
 
+    # LINE送信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=final_msg)]))
@@ -132,7 +139,7 @@ def handle_message(event):
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"🔍 {target_date.strftime('%m/%d')}の深層データをスキャン中です...")]
+                messages=[TextMessage(text=f"🔍 町田市予約システムを深層スキャン中（{target_date.strftime('%m/%d')}）...")]
             ))
         threading.Thread(target=scrap_and_push, args=(user_id, target_date)).start()
 
