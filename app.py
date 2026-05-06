@@ -37,13 +37,11 @@ def check_machida_tennis(target_date):
     if os.path.exists(chrome_bin):
         chrome_options.binary_location = chrome_bin
 
-    # ドライバーの起動（バージョン不一致を避けるため直接パス指定）
     try:
         if os.path.exists(driver_path):
             service = Service(executable_path=driver_path)
             driver = webdriver.Chrome(service=service, options=chrome_options)
         else:
-            # パスが見つからない場合は標準起動を試行
             driver = webdriver.Chrome(options=chrome_options)
     except Exception as e:
         return f"ブラウザの起動に失敗しました: {str(e)}"
@@ -53,6 +51,7 @@ def check_machida_tennis(target_date):
     day_wd = wd_list[target_date.weekday()]
     date_str = target_date.strftime("%Y/%m/%d")
     current_hour = datetime.now().hour
+    unique_slots = set()
 
     try:
         driver.get("https://www.pf489.com/machida/dselect.html")
@@ -60,6 +59,7 @@ def check_machida_tennis(target_date):
         driver.find_element(By.LINK_TEXT, "高機能検索").click()
         time.sleep(3)
         
+        # フレーム切替
         frames = driver.find_elements(By.XPATH, "//iframe | //frame")
         for f in frames:
             try:
@@ -67,7 +67,7 @@ def check_machida_tennis(target_date):
                 if "テニスコート" in driver.page_source: break
             except: driver.switch_to.default_content()
 
-        # 施設選択
+        # 施設選択（テニスコート全般）
         inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for ipt in inputs:
             try:
@@ -81,65 +81,70 @@ def check_machida_tennis(target_date):
         driver.execute_script("arguments[0].click();", search_btn)
         time.sleep(4)
 
-        # カレンダー画面で日付をクリック
+        # 1. 「施設別空き状況」画面で対象日の有効なリンクの数を把握する
         header_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]"
-        headers = driver.find_elements(By.XPATH, header_xpath)
         
-        clicked = False
-        for header in headers:
-            if len(header.text.strip()) > 10: continue
-            col_idx = len(header.find_elements(By.XPATH, "./preceding-sibling::td"))
-            table = header.find_element(By.XPATH, "./ancestor::table[1]")
-            for row in table.find_elements(By.TAG_NAME, "tr"):
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if len(cells) > col_idx:
-                    links = cells[col_idx].find_elements(By.TAG_NAME, "a")
-                    if links and links[0].text.strip() in ["○", "△"]:
-                        driver.execute_script("arguments[0].click();", links[0])
-                        clicked = True
-                        break
-            if clicked: break
+        def get_all_valid_links():
+            found_links = []
+            day_headers = driver.find_elements(By.XPATH, header_xpath)
+            for header in day_headers:
+                if len(header.text.strip()) > 10: continue
+                col_idx = len(header.find_elements(By.XPATH, "./preceding-sibling::td"))
+                table = header.find_element(By.XPATH, "./ancestor::table[1]")
+                for row in table.find_elements(By.TAG_NAME, "tr"):
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) > col_idx:
+                        links = cells[col_idx].find_elements(By.TAG_NAME, "a")
+                        if links and links[0].text.strip() in ["○", "△"]:
+                            found_links.append(links[0])
+            return found_links
+
+        # リンクの総数を取得
+        total_links = len(get_all_valid_links())
         
-        if not clicked:
-            return f"{date_str} の空きは見つかりませんでした。"
-
-        # 詳細画面解析（「次へ」をクリック）
-        time.sleep(3)
-        next_btns = driver.find_elements(By.XPATH, "//input[contains(@value, '次へ')] | //a[contains(., '次へ')]")
-        if next_btns:
-            driver.execute_script("arguments[0].click();", next_btns[-1])
-            time.sleep(5)
-
-        rows = driver.find_elements(By.TAG_NAME, "tr")
-        current_facility = "不明"
-        unique_slots = set()
-
-        for row in rows:
-            text = row.text.strip()
-            # 施設名の更新
-            if any(x in text for x in ["テニスコート", "グラウンド", "クリーンセンター"]) and "202" not in text:
-                current_facility = text.split(" ")[0].split("\n")[0]
-                continue
+        # 2. 各リンクを順番にクリックして詳細画面を解析
+        for i in range(total_links):
+            links = get_all_valid_links()
+            if i >= len(links): break
             
-            if "○" in text:
-                cells = row.find_elements(By.TAG_NAME, "td")
-                try:
-                    # 時間ヘッダーを探す
-                    header_row = row.find_element(By.XPATH, "./preceding::tr[contains(., '～')][1]")
-                    time_slots = [s for s in header_row.text.split() if "～" in s]
-                    court_name = cells[0].text.strip().replace("\n", "")
-                    
-                    for i, cell in enumerate(cells):
-                        if "○" in cell.text:
-                            time_idx = i - (len(cells) - len(time_slots))
-                            if 0 <= time_idx < len(time_slots):
-                                slot_time = time_slots[time_idx]
-                                start_hour = int(slot_time.split(":")[0])
-                                # 今日なら現時刻以前はスキップ
-                                if target_date.date() == datetime.now().date() and start_hour <= current_hour:
-                                    continue
-                                unique_slots.add(f"■ {current_facility}/{court_name}：{slot_time}")
-                except: continue
+            driver.execute_script("arguments[0].click();", links[i])
+            time.sleep(3)
+
+            # 詳細画面（時間帯別空き状況）での「次へ」対応
+            next_btns = driver.find_elements(By.XPATH, "//input[contains(@value, '次へ')] | //a[contains(., '次へ')]")
+            if next_btns:
+                driver.execute_script("arguments[0].click();", next_btns[-1])
+                time.sleep(3)
+
+            # 詳細画面の解析
+            rows = driver.find_elements(By.TAG_NAME, "tr")
+            current_facility = "不明"
+            for row in rows:
+                text = row.text.strip()
+                if any(x in text for x in ["テニスコート", "グラウンド", "クリーンセンター"]) and "202" not in text:
+                    current_facility = text.split(" ")[0].split("\n")[0]
+                    continue
+                
+                if "○" in text:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    try:
+                        header_row = row.find_element(By.XPATH, "./preceding::tr[contains(., '～')][1]")
+                        time_slots = [s for s in header_row.text.split() if "～" in s]
+                        court_name = cells[0].text.strip().replace("\n", "")
+                        for j, cell in enumerate(cells):
+                            if "○" in cell.text:
+                                time_idx = j - (len(cells) - len(time_slots))
+                                if 0 <= time_idx < len(time_slots):
+                                    slot_time = time_slots[time_idx]
+                                    start_hour = int(slot_time.split(":")[0])
+                                    if target_date.date() == datetime.now().date() and start_hour <= current_hour:
+                                        continue
+                                    unique_slots.add(f"■ {current_facility}/{court_name}：{slot_time}")
+                    except: continue
+            
+            # 元の画面に戻る
+            driver.back()
+            time.sleep(3)
 
         if not unique_slots:
             return f"{date_str} の予約可能な空き枠はありませんでした。"
@@ -174,7 +179,7 @@ def handle_message(event):
             # 最初の応答
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[MessagingTextMessage(text=f"{target_date.strftime('%m/%d')}を調べています。15〜20秒ほどお待ちください。")]
+                messages=[MessagingTextMessage(text=f"{target_date.strftime('%m/%d')}を調べています。全施設確認するため20〜30秒ほどお待ちください。")]
             ))
             # 重い処理
             result = check_machida_tennis(target_date)
