@@ -17,7 +17,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# --- LINE設定 (RenderのEnvironment Variablesで設定してください) ---
+# --- LINE設定 ---
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -29,7 +29,7 @@ def get_driver():
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    # Render環境で起動するためのパス指定
+    # Renderの標準的なChromeパス
     chrome_options.binary_location = "/usr/bin/google-chrome"
     return webdriver.Chrome(options=chrome_options)
 
@@ -43,6 +43,8 @@ def check_machida_tennis(target_dates):
         day_wd = wd_names[target_date.weekday()]
         date_str = target_date.strftime("%m/%d")
         unique_slots = set()
+        
+        # 今日を検索する場合のみ、今の時間より前の枠を除外
         current_hour = datetime.now().hour if target_date.date() == datetime.now().date() else -1
 
         try:
@@ -58,7 +60,7 @@ def check_machida_tennis(target_dates):
                     if "テニスコート" in driver.page_source: break
                 except: driver.switch_to.default_content()
 
-            # 施設選択
+            # 施設選択（テニスコート全般を選択）[cite: 1]
             inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
             for ipt in inputs:
                 try:
@@ -71,7 +73,7 @@ def check_machida_tennis(target_dates):
             driver.execute_script("arguments[0].click();", driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]"))
             time.sleep(4)
 
-            # カレンダー画面：○△をクリックして選択 (tennis_check_01準拠)[cite: 1]
+            # カレンダー画面：ターゲット日の○や△をクリック[cite: 1]
             header_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]"
             headers = driver.find_elements(By.XPATH, header_xpath)
 
@@ -91,6 +93,7 @@ def check_machida_tennis(target_dates):
                                 clicked_count += 1
                 except: continue
 
+            # 詳細画面へ遷移して解析[cite: 1]
             if clicked_count > 0:
                 next_btns = driver.find_elements(By.XPATH, "//input[contains(@value, '次へ')] | //a[contains(., '次へ')]")
                 driver.execute_script("arguments[0].click();", next_btns[-1])
@@ -99,7 +102,6 @@ def check_machida_tennis(target_dates):
                 try: Alert(driver).accept()
                 except NoAlertPresentException: pass
 
-                # 詳細画面解析 (tennis_check_01準拠)[cite: 1]
                 rows = driver.find_elements(By.TAG_NAME, "tr")
                 current_facility = "不明な施設"
                 for row in rows:
@@ -125,7 +127,7 @@ def check_machida_tennis(target_dates):
             res_text = f"【{date_str}({day_wd})】\n" + ("\n".join(sorted(list(unique_slots))) if unique_slots else "空きなし")
             all_results.append(res_text)
         except Exception as e:
-            all_results.append(f"【{date_str}】エラー発生")
+            all_results.append(f"【{date_str}】解析エラー")
         finally:
             driver.quit()
 
@@ -141,25 +143,45 @@ def callback():
         abort(400)
     return 'OK'
 
-@handler.add(MessageEvent, content_type=TextMessageContent)
+# 修正ポイント: content_type -> message[cite: 1]
+@handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_msg = event.message.text
     today = datetime.now()
     target_dates = []
+    
+    # 曜日インデックス定義
+    wd_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
 
-    # キーワード判定
-    if "今日" in user_msg: target_dates.append(today)
-    elif "明日" in user_msg: target_dates.append(today + timedelta(days=1))
+    # 1. 特殊キーワード判定
+    if "今日" in user_msg:
+        target_dates.append(today)
+    elif "明日" in user_msg:
+        target_dates.append(today + timedelta(days=1))
     elif "週末" in user_msg:
-        diff = (5 - today.weekday() + 7) % 7
-        sat = today + timedelta(days=diff if diff > 0 else 7)
+        # 次の土曜日を計算
+        diff_sat = (5 - today.weekday() + 7) % 7
+        if diff_sat == 0: diff_sat = 7
+        sat = today + timedelta(days=diff_sat)
         target_dates.extend([sat, sat + timedelta(days=1)])
+    
+    # 2. 曜日キーワード判定（今日を含まない次）
     else:
-        # 曜日判定などのロジックをここに入れる（任意）
+        for key, val in wd_map.items():
+            if key in user_msg:
+                diff = (val - today.weekday() + 7) % 7
+                # 今日と同じ曜日の場合は7日後、それ以外は次の該当曜日
+                days_to_add = diff if diff > 0 else 7
+                target_dates.append(today + timedelta(days=days_to_add))
+                break
+
+    if not target_dates:
         return
 
+    # 解析実行
     result = check_machida_tennis(target_dates)
     
+    # LINEへ返信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
