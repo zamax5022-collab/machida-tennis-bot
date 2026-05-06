@@ -1,12 +1,11 @@
 import os
 import time
 from datetime import datetime, timedelta
-from flask import Flask, request, abort
+from flask import Flask, request
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-# webdriver_manager は不要になったため削除
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
@@ -19,46 +18,38 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 def check_machida_tennis(target_date):
-    print(f"--- スクレイピング開始: {target_date.strftime('%Y/%m/%d')} ---")
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
+    print(f"--- 探索開始: {target_date.strftime('%Y/%m/%d')} ---")
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--blink-settings=imagesEnabled=false')
     
-    # Render環境の最新Chromeバイナリを指定
     chrome_bin = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
     if os.path.exists(chrome_bin):
-        chrome_options.binary_location = chrome_bin
-        print(f"Chromeバイナリを使用: {chrome_bin}")
+        options.binary_location = chrome_bin
 
     driver = None
     try:
-        print("最新のChromeDriverを自動構成して起動中...")
-        # Service()の中に手動でパスを書かず、空にすることで最新版を自動取得させます
-        driver = webdriver.Chrome(options=chrome_options)
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(30)
         
-        print("町田市予約システムにアクセス中...")
         driver.get("https://www.pf489.com/machida/dselect.html")
-        time.sleep(3)
-        
-        print("高機能検索をクリック...")
+        time.sleep(2)
         driver.find_element(By.LINK_TEXT, "高機能検索").click()
-        time.sleep(3)
+        time.sleep(2)
         
-        # --- フレームの切り替え ---
+        # フレーム切り替え
         frames = driver.find_elements(By.XPATH, "//iframe | //frame")
         for f in frames:
             try:
                 driver.switch_to.frame(f)
-                if "テニスコート" in driver.page_source: 
-                    print("対象フレームを発見。")
-                    break
-            except: 
-                driver.switch_to.default_content()
+                if "テニスコート" in driver.page_source: break
+            except: driver.switch_to.default_content()
 
-        # --- 施設選択 ---
-        print("施設を選択中...")
+        # 全てのテニスコートを選択（コミュニティセンター以外）
+        print("全施設を選択中...")
         inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for ipt in inputs:
             try:
@@ -68,16 +59,16 @@ def check_machida_tennis(target_date):
                     driver.execute_script("arguments[0].click();", ipt)
             except: continue
 
-        print("照会実行...")
         search_btn = driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]")
         driver.execute_script("arguments[0].click();", search_btn)
         time.sleep(5)
 
-        # --- カレンダー解析 ---
+        # カレンダーから日付を探す
         day_num = str(target_date.day)
         wd_list = ["月", "火", "水", "木", "金", "土", "日"]
         day_wd = wd_list[target_date.weekday()]
         
+        # 正確な日付セルを特定（10文字以内のセルに限定して誤爆を防ぐ）
         header_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]"
         headers = driver.find_elements(By.XPATH, header_xpath)
         
@@ -96,63 +87,65 @@ def check_machida_tennis(target_date):
                         break
             if clicked: break
         
-        if not clicked: 
-            return f"{target_date.strftime('%m/%d')} の空きはありません。"
+        if not clicked: return f"{target_date.strftime('%m/%d')} の空きはありません。"
 
         time.sleep(4)
-        # --- 詳細解析 ---
+        # 詳細画面の解析
+        unique_slots = []
         rows = driver.find_elements(By.TAG_NAME, "tr")
         current_facility = "不明"
-        unique_slots = set()
 
         for row in rows:
             text = row.text.strip()
+            # 施設名の取得
             if any(x in text for x in ["テニスコート", "グラウンド", "クリーンセンター"]) and "202" not in text:
-                current_facility = text.split(" ")[0].split("\n")[0]
+                current_facility = text.split()[0]
                 continue
+            
+            # 「○」がある行を解析
             if "○" in text:
                 cells = row.find_elements(By.TAG_NAME, "td")
+                court_name = cells[0].text.replace("\n", "")
+                
+                # 時間枠のヘッダーを探す
                 try:
                     header_row = row.find_element(By.XPATH, "./preceding::tr[contains(., '～')][1]")
                     time_slots = [s for s in header_row.text.split() if "～" in s]
-                    court_name = cells[0].text.strip().replace("\n", "")
+                    
+                    # ○の位置から時間を特定
                     for i, cell in enumerate(cells):
                         if "○" in cell.text:
+                            # 時間枠のインデックスを計算
                             time_idx = i - (len(cells) - len(time_slots))
                             if 0 <= time_idx < len(time_slots):
-                                unique_slots.add(f"■ {current_facility}/{court_name}：{time_slots[time_idx]}")
+                                unique_slots.append(f"■ {current_facility} {court_name}\n   {time_slots[time_idx]}")
                 except: continue
 
-        return f"【{target_date.strftime('%m/%d')} の空き】\n" + "\n".join(sorted(list(unique_slots))) if unique_slots else "空き枠はありません。"
+        if not unique_slots: return f"{target_date.strftime('%m/%d')}：詳細を確認しましたが空きは見つかりませんでした。"
+        
+        return f"【{target_date.strftime('%m/%d')} 空きあり！】\n\n" + "\n\n".join(unique_slots)
 
     except Exception as e:
-        print(f"詳細エラー: {str(e)}")
-        return f"エラーが発生しました。時間を置いて試してください。"
+        print(f"エラー: {str(e)}")
+        return f"検索中にエラーが発生しました。"
     finally:
-        if driver:
-            driver.quit()
+        if driver: driver.quit()
 
 @app.route("/callback", methods=['POST'])
 def callback():
     body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, request.headers.get('X-Line-Signature', ''))
-    except:
-        pass
+    try: handler.handle(body, request.headers.get('X-Line-Signature', ''))
+    except: pass
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text
-    if "今日" in text:
-        target_date = datetime.now()
-    elif "明日" in text:
-        target_date = datetime.now() + timedelta(days=1)
-    else:
-        return
+    if "今日" in text: target_date = datetime.now()
+    elif "明日" in text: target_date = datetime.now() + timedelta(days=1)
+    else: return
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{target_date.strftime('%m/%d')}を調べています。しばらくお待ちください..."))
-    
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{target_date.strftime('%m/%d')}の全施設を調査中です。約1分お待ちください..."))
     result = check_machida_tennis(target_date)
     line_bot_api.push_message(event.source.user_id, TextSendMessage(text=result))
 
