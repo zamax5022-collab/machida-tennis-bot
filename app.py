@@ -46,7 +46,7 @@ def check_machida_tennis(target_dates):
             driver = get_driver()
             wait = WebDriverWait(driver, 25)
             
-            # Step 1-3 は成功しているので維持
+            # Step 1-3: ここまでは安定
             driver.get("https://www.pf489.com/machida/dselect.html")
             search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
             driver.execute_script("arguments[0].click();", search_links[0])
@@ -60,31 +60,47 @@ def check_machida_tennis(target_dates):
                         cb = driver.find_element(By.ID, label_id)
                         if not cb.is_selected():
                             driver.execute_script("arguments[0].click();", cb)
+                            # チェックを入れた後の自動更新を待つ
+                            time.sleep(2)
 
-            # Step 4: 空き照会ボタン
+            # Step 4: 空き照会ボタン（リトライロジックを大幅強化）
             current_step = "4.空き照会ボタン押下"
-            time.sleep(2)
-            driver.execute_script("document.querySelector('input[value=\"空き照会\"]').click();")
+            # 画面が落ち着くまで最大5回リトライ
+            btn_clicked = False
+            for i in range(5):
+                try:
+                    # ボタンを再検索
+                    btn = driver.find_element(By.XPATH, "//input[@value='空き照会']")
+                    if btn:
+                        driver.execute_script("arguments[0].click();", btn)
+                        print(f"[Log] 空き照会ボタンをクリックしました (試行 {i+1})", flush=True)
+                        btn_clicked = True
+                        break
+                except:
+                    print(f"[Log] ボタンクリック再試行中... ({i+1}/5)", flush=True)
+                    time.sleep(2)
             
-            # Step 5: 日付選択（ロジックを大幅強化）
+            if not btn_clicked:
+                raise Exception("空き照会ボタンが見つからないか、クリックできませんでした。")
+            
+            # Step 5: 日付選択
             current_step = "5.カレンダー日付選択"
-            # ページ遷移を待機
-            wait.until(EC.presence_of_element_located((By.ID, "dgCalendar"))) 
+            time.sleep(5)
+            # カレンダーの表示を確認
+            wait.until(EC.presence_of_element_located((By.XPATH, "//table[contains(@id, 'Calendar')]")))
             
             day_num = str(target_date.day)
-            # 町田市のシステムは「6(水)」のような形式、または単なる「6」の場合があります。
-            # 数字が完全に一致するaタグ、またはaタグの中のspanを探します。
-            date_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'SelectDate')]")
-            
+            # 全ての日付リンクを取得してループ
+            links = driver.find_elements(By.TAG_NAME, "a")
             target_link = None
-            for link in date_links:
-                # リンク内のテキストが指定の日付数字から始まっているか確認
-                if link.text.strip().startswith(day_num):
-                    target_link = link
+            for l in links:
+                txt = l.text.strip()
+                # 「6」や「6(水)」など、数字から始まるものを探す
+                if txt.startswith(day_num) and (len(txt) == len(day_num) or not txt[len(day_num)].isdigit()):
+                    target_link = l
                     break
             
             if target_link:
-                print(f"[Log] 日付リンク発見: {target_link.text}", flush=True)
                 driver.execute_script("arguments[0].click();", target_link)
             else:
                 raise Exception(f"{day_num}日のリンクが見つかりません。")
@@ -99,7 +115,6 @@ def check_machida_tennis(target_dates):
             current_step = "7.結果抽出"
             time.sleep(5)
             slots = []
-            # 施設名や時間帯が含まれるテーブルを探す
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
                 if "○" in r.text:
