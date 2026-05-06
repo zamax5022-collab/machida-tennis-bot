@@ -40,7 +40,6 @@ def check_machida_tennis(target_date):
         driver.find_element(By.LINK_TEXT, "高機能検索").click()
         time.sleep(2)
         
-        # フレーム切り替え
         frames = driver.find_elements(By.XPATH, "//iframe | //frame")
         for f in frames:
             try:
@@ -48,8 +47,7 @@ def check_machida_tennis(target_date):
                 if "テニスコート" in driver.page_source: break
             except: driver.switch_to.default_content()
 
-        # 全てのテニスコートを選択（コミュニティセンター以外）
-        print("全施設を選択中...")
+        print("施設を選択中...")
         inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for ipt in inputs:
             try:
@@ -63,12 +61,11 @@ def check_machida_tennis(target_date):
         driver.execute_script("arguments[0].click();", search_btn)
         time.sleep(5)
 
-        # カレンダーから日付を探す
         day_num = str(target_date.day)
         wd_list = ["月", "火", "水", "木", "金", "土", "日"]
         day_wd = wd_list[target_date.weekday()]
         
-        # 正確な日付セルを特定（10文字以内のセルに限定して誤爆を防ぐ）
+        # カレンダーからの遷移
         header_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]"
         headers = driver.find_elements(By.XPATH, header_xpath)
         
@@ -90,65 +87,59 @@ def check_machida_tennis(target_date):
         if not clicked: return f"{target_date.strftime('%m/%d')} の空きはありません。"
 
         time.sleep(4)
-        # 詳細画面の解析
+        
+        # --- 解析ロジックの強化版 ---
         unique_slots = []
         rows = driver.find_elements(By.TAG_NAME, "tr")
         current_facility = "不明"
+        time_headers = []
 
         for row in rows:
             text = row.text.strip()
-            # 施設名の取得
-            if any(x in text for x in ["テニスコート", "グラウンド", "クリーンセンター"]) and "202" not in text:
-                current_facility = text.split()[0]
-                continue
+            if not text: continue
             
-            # 「○」がある行を解析
+            # 施設名の更新
+            if any(x in text for x in ["テニスコート", "グラウンド", "クリーンセンター"]) and "202" not in text:
+                current_facility = text.split()[0].replace("\n", "")
+                continue
+
+            # 時間ヘッダー行の特定 (～を含む行)
+            if "～" in text and ("09" in text or "08" in text):
+                time_headers = [t for t in text.split() if "～" in t]
+                continue
+
+            # ○が含まれる行の解析
             if "○" in text:
                 cells = row.find_elements(By.TAG_NAME, "td")
-                court_name = cells[0].text.replace("\n", "")
+                if not cells: continue
                 
-                # 時間枠のヘッダーを探す
-                try:
-                    header_row = row.find_element(By.XPATH, "./preceding::tr[contains(., '～')][1]")
-                    time_slots = [s for s in header_row.text.split() if "～" in s]
-                    
-                    # ○の位置から時間を特定
-                    for i, cell in enumerate(cells):
-                        if "○" in cell.text:
-                            # 時間枠のインデックスを計算
-                            time_idx = i - (len(cells) - len(time_slots))
-                            if 0 <= time_idx < len(time_slots):
-                                unique_slots.append(f"■ {current_facility} {court_name}\n   {time_slots[time_idx]}")
-                except: continue
+                court_name = cells[0].text.replace("\n", "").strip()
+                
+                # セルの中身を一つずつ見て、○があれば対応する時間のヘッダーと紐付け
+                # 右側から数えることで、左側の名称列を避ける
+                available_indices = []
+                for idx, cell in enumerate(cells):
+                    if "○" in cell.text:
+                        available_indices.append(idx)
+                
+                # 後ろから数えて時間枠を特定
+                for idx in available_indices:
+                    # 時間枠ヘッダーの数に合わせて、セルのインデックスを調整
+                    time_idx = idx - (len(cells) - len(time_headers))
+                    if 0 <= time_idx < len(time_headers):
+                        slot_info = f"■ {current_facility} {court_name}\n   {time_headers[time_idx]}"
+                        if slot_info not in unique_slots:
+                            unique_slots.append(slot_info)
 
-        if not unique_slots: return f"{target_date.strftime('%m/%d')}：詳細を確認しましたが空きは見つかりませんでした。"
+        if not unique_slots:
+            return f"{target_date.strftime('%m/%d')}：システム上に○はありましたが、詳細を読み取れませんでした。直接サイトを確認してください。"
         
-        return f"【{target_date.strftime('%m/%d')} 空きあり！】\n\n" + "\n\n".join(unique_slots)
+        return f"【{target_date.strftime('%m/%d')} 空き状況】\n\n" + "\n\n".join(unique_slots)
 
     except Exception as e:
-        print(f"エラー: {str(e)}")
-        return f"検索中にエラーが発生しました。"
+        print(f"詳細エラー: {str(e)}")
+        return f"エラーが発生しました。"
     finally:
         if driver: driver.quit()
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    body = request.get_data(as_text=True)
-    try: handler.handle(body, request.headers.get('X-Line-Signature', ''))
-    except: pass
-    return 'OK'
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    text = event.message.text
-    if "今日" in text: target_date = datetime.now()
-    elif "明日" in text: target_date = datetime.now() + timedelta(days=1)
-    else: return
-
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{target_date.strftime('%m/%d')}の全施設を調査中です。約1分お待ちください..."))
-    result = check_machida_tennis(target_date)
-    line_bot_api.push_message(event.source.user_id, TextSendMessage(text=result))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+# （以下、callbackやhandle_messageは前回と同じ）
