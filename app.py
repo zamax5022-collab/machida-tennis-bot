@@ -31,6 +31,7 @@ def get_driver():
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1280,1024')
+    # ブラウザを偽装してボット検知を回避
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     return webdriver.Chrome(options=chrome_options)
 
@@ -43,56 +44,51 @@ def check_machida_tennis(target_dates):
         current_step = "開始前"
         try:
             driver = get_driver()
-            wait = WebDriverWait(driver, 40)
+            wait = WebDriverWait(driver, 30)
             
-            # Step 1: トップページ
-            current_step = "1.トップページ読み込み"
+            # Step 1-2: 遷移
+            current_step = "1-2.高機能検索へアクセス"
             print(f"[Log] {current_step}", flush=True)
-            driver.get("https://www.pf489.com/machida/dselect.html")
+            driver.get("https://www.pf489.com/machida/P_A_Select_A.aspx")
             
-            # Step 2: 直接遷移
-            current_step = "2.高機能検索ページへ直接遷移"
-            print(f"[Log] {current_step}", flush=True)
-            driver.execute_script("location.href='https://www.pf489.com/machida/P_A_Select_A.aspx';")
-            
-            # Step 3: 施設選択
+            # Step 3: 施設選択（ここで詳細ログを出す）
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
-            wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
+            
+            # 5秒待ってから状態を確認
             time.sleep(5)
+            print(f"[Debug] Current URL: {driver.current_url}", flush=True)
+            print(f"[Debug] Page Title: {driver.title}", flush=True)
             
+            # 画面のテキストを一部取得（何が起きているか可視化）
+            try:
+                body_text = driver.find_element(By.TAG_NAME, "body").text[:200].replace('\n', ' ')
+                print(f"[Debug] Body Snippet: {body_text}", flush=True)
+            except:
+                print("[Debug] Could not get body text", flush=True)
+
+            # ラベルを探す
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
             labels = driver.find_elements(By.TAG_NAME, "label")
-            print(f"[Debug] 見つかった全ラベル数: {len(labels)}", flush=True)
+            print(f"[Debug] Found {len(labels)} labels", flush=True)
             
-            target_count = 0
-            selected_count = 0
+            found_count = 0
             for label in labels:
-                label_text = label.text
-                if "テニスコート" in label_text and "コミュニティ" not in label_text:
-                    target_count += 1
+                if "テニスコート" in label.text and "コミュニティ" not in label.text:
                     label_id = label.get_attribute("for")
                     if label_id:
-                        try:
-                            checkbox = driver.find_element(By.ID, label_id)
-                            if not checkbox.is_selected():
-                                driver.execute_script("arguments[0].click();", checkbox)
-                                selected_count += 1
-                                print(f"[Debug] 選択成功: {label_text}", flush=True)
-                            else:
-                                selected_count += 1
-                                print(f"[Debug] 既に選択済み: {label_text}", flush=True)
-                        except Exception as click_err:
-                            print(f"[Debug] 選択失敗({label_text}): {str(click_err)[:30]}", flush=True)
+                        cb = driver.find_element(By.ID, label_id)
+                        driver.execute_script("arguments[0].click();", cb)
+                        found_count += 1
             
-            print(f"[Log] 判定結果: 対象施設={target_count}, 選択済み={selected_count}", flush=True)
-            if target_count == 0:
-                raise Exception("テニスコートが見つかりません")
+            print(f"[Log] 選択した施設数: {found_count}", flush=True)
+            if found_count == 0:
+                raise Exception("テニス施設が見つかりません。")
 
             # Step 4: 検索実行
             current_step = "4.空き照会ボタン押下"
             print(f"[Log] {current_step}", flush=True)
-            search_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '空き照会')]")))
+            search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@value='空き照会']")))
             driver.execute_script("arguments[0].click();", search_btn)
             
             # Step 5: カレンダー日付選択
@@ -107,7 +103,7 @@ def check_machida_tennis(target_dates):
             day_links = driver.find_elements(By.XPATH, cal_xpath)
             
             if not day_links:
-                all_results.append(f"【{date_str}】空きなし(選択不可)")
+                all_results.append(f"【{date_str}】空きなし(または選択不可)")
                 continue
             driver.execute_script("arguments[0].click();", day_links[0])
             
@@ -117,33 +113,30 @@ def check_machida_tennis(target_dates):
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '次へ')]")))
             driver.execute_script("arguments[0].click();", next_btn)
             
-            # Step 7: 結果抽出（SyntaxErrorを修正）
+            # Step 7: 結果抽出
             current_step = "7.詳細データ抽出"
             print(f"[Log] {current_step}", flush=True)
             time.sleep(4)
-            
             slots = []
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
                 if "○" in r.text:
-                    # 改行置換をf-stringの外側で行う
                     clean_text = r.text.replace("\n", " ").strip()
                     slots.append(f"■ {clean_text}")
             
             res = f"【{date_str}({day_wd})】\n" + ("\n".join(slots) if slots else "空きなし")
             all_results.append(res)
-            print(f"[Log] {date_str} 完了", flush=True)
 
         except Exception as e:
-            error_msg = f"エラー(Step:{current_step}): {str(e)[:100]}"
-            print(f"[Error] {error_msg}", flush=True)
-            all_results.append(f"【{target_date.strftime('%m/%d')}】{error_msg}")
+            # エラー時にStacktraceの一部もログに出す
+            print(f"[Error] {current_step} で問題発生: {str(e)[:100]}", flush=True)
+            all_results.append(f"【{target_date.strftime('%m/%d')}】{current_step}でエラー")
         finally:
-            if driver: driver.quit()
+            if driver:
+                driver.quit()
 
     return "\n\n".join(all_results)
 
-# --- LINE Callback & Handler (変更なし) ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
