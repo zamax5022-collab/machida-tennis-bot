@@ -46,44 +46,54 @@ def check_machida_tennis(target_dates):
         try:
             print(f"[Log] 検索プロセス開始: {target_date.strftime('%m/%d')}", flush=True)
             driver = get_driver()
-            wait = WebDriverWait(driver, 20)
+            wait = WebDriverWait(driver, 25)
             
             # Step 1: トップページ
             current_step = "1.トップページ読み込み"
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # Step 2: 高機能検索ボタン押下
+            # Step 2: 高機能検索ボタン
             current_step = "2.高機能検索ボタン特定"
             search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
             driver.execute_script("arguments[0].click();", search_links[0])
             
             # Step 3: 施設選択
-            current_step = "3.施設(テニスコート)選択"
+            current_step = "3.施設選択"
+            time.sleep(3)
+            labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
+            
             success_selection = False
-            for i in range(10):
-                time.sleep(3)
-                labels = driver.find_elements(By.TAG_NAME, "label")
-                if len(labels) > 0:
-                    for label in labels:
-                        if "テニスコート" in label.text and "コミュニティ" not in label.text:
-                            label_id = label.get_attribute("for")
-                            if label_id:
-                                cb = driver.find_element(By.ID, label_id)
-                                if not cb.is_selected():
-                                    driver.execute_script("arguments[0].click();", cb)
-                                    success_selection = True
-                    if success_selection: break
-                print(f"[Log] Step 3 リトライ中...({i+1}/10)", flush=True)
-
+            for label in labels:
+                if "テニスコート" in label.text and "コミュニティ" not in label.text:
+                    label_id = label.get_attribute("for")
+                    if label_id:
+                        cb = driver.find_element(By.ID, label_id)
+                        if not cb.is_selected():
+                            driver.execute_script("arguments[0].click();", cb)
+                            success_selection = True
+            
             if not success_selection:
-                raise Exception(f"施設リストが見つかりません(URL:{driver.current_url})")
+                raise Exception("テニスコート項目の特定・選択に失敗しました")
 
             # Step 4: 空き照会ボタン
             current_step = "4.空き照会ボタン押下"
-            search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@value='空き照会']")))
-            driver.execute_script("arguments[0].click();", search_btn)
+            time.sleep(2)
+            # 複数のアプローチでボタンを探してクリック
+            search_btn = None
+            btns = driver.find_elements(By.XPATH, "//input[@type='submit' or @type='button']")
+            for b in btns:
+                val = b.get_attribute("value")
+                if val and "空き照会" in val:
+                    search_btn = b
+                    break
             
-            # Step 5: カレンダー日付選択
+            if search_btn:
+                driver.execute_script("arguments[0].click();", search_btn)
+            else:
+                # JavaScriptによる強制実行
+                driver.execute_script("document.querySelector('input[value=\"空き照会\"]').click();")
+            
+            # Step 5: 日付選択
             current_step = "5.カレンダー日付選択"
             time.sleep(5)
             day_num = str(target_date.day)
@@ -104,17 +114,20 @@ def check_machida_tennis(target_dates):
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
                 if "○" in r.text:
-                    # 修正点：f-string内でのバックスラッシュを回避
-                    row_text = r.text.replace("\n", " ").strip()
-                    slots.append(f"■ {row_text}")
+                    # 改行をスペースに置換（f-string外で処理）
+                    clean_row = r.text.replace("\n", " ").strip()
+                    slots.append(f"■ {clean_row}")
             
-            res = f"【{target_date.strftime('%m/%d')}】\n" + ("\n".join(slots) if slots else "空きなし")
+            date_label = target_date.strftime('%m/%d')
+            res = f"【{date_label}({day_wd})】\n" + ("\n".join(slots) if slots else "空きなし")
             all_results.append(res)
 
         except Exception as e:
             error_msg = f"[Error] {current_step}: {str(e)}"
             print(error_msg, flush=True)
-            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}")
+            # 詳細なスタックトレースもログに出力
+            print(traceback.format_exc(), flush=True)
+            all_results.append(f"【{target_date.strftime('%m/%d')}】エラーが発生：{current_step}")
         finally:
             if driver: driver.quit()
 
@@ -124,27 +137,30 @@ def check_machida_tennis(target_dates):
 def callback():
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
-    print(f"[System] Webhook受信: {body[:100]}...", flush=True)
+    print(f"[System] Webhook受信: {body[:100]}", flush=True)
     try:
         handler.handle(body, signature)
     except Exception as e:
-        print(f"[Critical] Webhook Handle Error: {str(e)}", flush=True)
+        print(f"[Critical] Webhook Error: {str(e)}", flush=True)
         abort(400)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     msg = event.message.text
-    print(f"[Log] 受信: {msg}", flush=True)
+    print(f"[Log] ユーザー入力: {msg}", flush=True)
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        
         try:
             if "今日" in msg or "明日" in msg:
                 today = datetime.now()
+                # 日付の判定
                 target_dates = [today] if "今日" in msg else [today + timedelta(days=1)]
+                
+                # 検索実行
                 result = check_machida_tennis(target_dates)
+                
                 line_bot_api.reply_message(ReplyMessageRequest(
                     reply_token=event.reply_token,
                     messages=[TextMessage(text=result)]
@@ -152,14 +168,13 @@ def handle_message(event):
             else:
                 line_bot_api.reply_message(ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text="「今日」または「明日」と送ってください。")]
+                    messages=[TextMessage(text="「今日」または「明日」と入力してください。")]
                 ))
         except Exception as e:
-            error_detail = traceback.format_exc()
-            print(f"[Critical] Handle Error:\n{error_detail}", flush=True)
+            print(f"[Critical] Handle Error: {str(e)}", flush=True)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"Bot内部エラー:\n{str(e)}")]
+                messages=[TextMessage(text=f"Bot内部エラーが発生しました：{str(e)}")]
             ))
 
 if __name__ == "__main__":
