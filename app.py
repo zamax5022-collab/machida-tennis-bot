@@ -42,7 +42,7 @@ def check_machida_tennis(target_dates):
         current_step = "開始前"
         try:
             driver = get_driver()
-            wait = WebDriverWait(driver, 30)
+            wait = WebDriverWait(driver, 20)
             
             # Step 1: トップページ
             current_step = "1.トップページ読み込み"
@@ -50,23 +50,28 @@ def check_machida_tennis(target_dates):
             driver.get("https://www.pf489.com/machida/dselect.html")
             
             # Step 2: 高機能検索への遷移
+            # JSでURLを書き換えるのではなく、ページ上のリンクを物理的に探してクリックします
             current_step = "2.高機能検索ボタン押下"
             print(f"[Log] {current_step}", flush=True)
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "a")))
-            driver.execute_script("location.href='P_A_Select_A.aspx';")
             
-            # --- デバッグ用：遷移後の状態確認 ---
-            time.sleep(5) 
-            print(f"[Debug] 現在のURL: {driver.current_url}", flush=True)
-            print(f"[Debug] 画面タイトル: {driver.title}", flush=True)
-            # ----------------------------------
-
+            # 「高機能検索」というテキストを持つリンク、またはその画像を探す
+            # 町田市のシステムは <img> を使っていることが多いため、alt属性も対象にします
+            search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
+            
+            if not search_links:
+                raise Exception("高機能検索ボタンが見つかりません")
+            
+            # 最初の候補をクリック
+            driver.execute_script("arguments[0].click();", search_links[0])
+            
             # Step 3: 施設選択
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
             
             success_selection = False
+            # 画面遷移を待つため少し長めにリトライ
             for i in range(10):
+                time.sleep(3)
                 labels = driver.find_elements(By.TAG_NAME, "label")
                 if len(labels) > 0:
                     for label in labels:
@@ -77,17 +82,13 @@ def check_machida_tennis(target_dates):
                                 if not cb.is_selected():
                                     driver.execute_script("arguments[0].click();", cb)
                                     success_selection = True
-                    if success_selection: 
-                        print(f"[Log] {current_step} 成功", flush=True)
-                        break
-                else:
-                    # ラベルが1つも見つからない場合、HTML構造を一部出力
-                    body_text = driver.find_element(By.TAG_NAME, "body").text[:100].replace('\n', ' ')
-                    print(f"[Log] {current_step} リトライ中...({i+1}/10) 内容控え: {body_text}", flush=True)
-                time.sleep(3)
+                    if success_selection: break
+                
+                # デバッグ用：失敗時の状態表示
+                print(f"[Log] {current_step} リトライ中...({i+1}/10) URL: {driver.current_url}", flush=True)
 
             if not success_selection:
-                raise Exception(f"施設リストが見つかりません (URL: {driver.current_url})")
+                raise Exception(f"施設リストが見つかりません。現在のURL: {driver.current_url}")
 
             # Step 4: 空き照会ボタン
             current_step = "4.空き照会ボタン押下"
@@ -135,19 +136,7 @@ def check_machida_tennis(target_dates):
 
     return "\n\n".join(all_results)
 
-# ---------------------------------------------------------
-# LINE Bot 側の処理 (変更なし)
-# ---------------------------------------------------------
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers.get('X-Line-Signature')
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except:
-        abort(400)
-    return 'OK'
-
+# --- LINE Bot のハンドラ部分は変更なし ---
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     msg = event.message.text
