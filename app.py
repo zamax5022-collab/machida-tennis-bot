@@ -17,7 +17,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# --- LINE設定 (RenderのEnvironment Variablesから取得) ---
+# --- LINE設定 (RenderのEnvironmentタブで設定してください) ---
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -25,16 +25,16 @@ configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
 def get_driver():
-    """Render環境にインストールされたChromeを自動認識して起動する"""
+    """DockerfileでインストールしたChromeを起動する"""
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    # バイナリパスを固定せず、Selenium Managerに自動探索させる
+    # Docker環境ではパス指定なしでシステム内のChromeが自動認識されます
     return webdriver.Chrome(options=chrome_options)
 
 def check_machida_tennis(target_dates):
-    """町田市の施設予約サイトを解析するメインロジック"""
+    """町田市予約サイトの解析エンジン[cite: 1]"""
     wd_names = ["月", "火", "水", "木", "金", "土", "日"]
     all_results = []
 
@@ -45,7 +45,7 @@ def check_machida_tennis(target_dates):
         date_str = target_date.strftime("%m/%d")
         unique_slots = set()
         
-        # 今日を検索する場合のみ、現在時刻より前の枠は除外[cite: 1]
+        # 今日を検索する場合のみ、現在時刻より前の枠を除外[cite: 1]
         current_hour = datetime.now().hour if target_date.date() == datetime.now().date() else -1
 
         try:
@@ -62,7 +62,7 @@ def check_machida_tennis(target_dates):
                     if "テニスコート" in driver.page_source: break
                 except: driver.switch_to.default_content()
 
-            # 施設選択[cite: 1]
+            # 施設選択ロジック[cite: 1]
             inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
             for ipt in inputs:
                 try:
@@ -75,7 +75,7 @@ def check_machida_tennis(target_dates):
             driver.execute_script("arguments[0].click();", driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]"))
             time.sleep(4)
 
-            # カレンダー画面：○や△をクリック[cite: 1]
+            # カレンダー画面解析[cite: 1]
             header_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]"
             headers = driver.find_elements(By.XPATH, header_xpath)
 
@@ -95,7 +95,7 @@ def check_machida_tennis(target_dates):
                                 clicked_count += 1
                 except: continue
 
-            # 詳細画面解析[cite: 1]
+            # 詳細画面遷移とデータ抽出[cite: 1]
             if clicked_count > 0:
                 next_btns = driver.find_elements(By.XPATH, "//input[contains(@value, '次へ')] | //a[contains(., '次へ')]")
                 driver.execute_script("arguments[0].click();", next_btns[-1])
@@ -129,7 +129,7 @@ def check_machida_tennis(target_dates):
             res_text = f"【{date_str}({day_wd})】\n" + ("\n".join(sorted(list(unique_slots))) if unique_slots else "空きなし")
             all_results.append(res_text)
         except Exception as e:
-            all_results.append(f"【{date_str}】解析エラーが発生しました")
+            all_results.append(f"【{date_str}】検索中にエラーが発生しました")
         finally:
             driver.quit()
 
@@ -145,28 +145,26 @@ def callback():
         abort(400)
     return 'OK'
 
-# 最新SDK仕様: message=TextMessageContent に修正[cite: 1]
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    """メッセージ受信時の処理 (最新SDK準拠)[cite: 1]"""
     user_msg = event.message.text
     today = datetime.now()
     target_dates = []
     
     wd_map = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
 
-    # キーワード判定 (すべて今日を含まない次を計算)
+    # 判定ロジック：今日、明日、週末、各曜日
     if "今日" in user_msg:
         target_dates.append(today)
     elif "明日" in user_msg:
         target_dates.append(today + timedelta(days=1))
     elif "週末" in user_msg:
-        # 次の土曜日を起点にする
         diff_sat = (5 - today.weekday() + 7) % 7
         days_to_sat = diff_sat if diff_sat > 0 else 7
         sat = today + timedelta(days=days_to_sat)
         target_dates.extend([sat, sat + timedelta(days=1)])
     else:
-        # 各曜日の判定
         for key, val in wd_map.items():
             if key in user_msg:
                 diff = (val - today.weekday() + 7) % 7
@@ -177,18 +175,18 @@ def handle_message(event):
     if not target_dates:
         return
 
-    # 解析実行と返信
     result = check_machida_tennis(target_dates)
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
-            ReplyMessageRequest(
+            Reply_Message_Request(
                 reply_token=event.reply_token,
                 messages=[TextMessage(text=result)]
             )
         )
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    # Docker環境では10000番ポートで待受
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
