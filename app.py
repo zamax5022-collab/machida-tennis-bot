@@ -14,7 +14,6 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# 環境変数
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=access_token)
@@ -31,7 +30,6 @@ def get_driver():
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1280,1024')
-    # 一般的なブラウザに見せかける設定
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     return webdriver.Chrome(options=chrome_options)
 
@@ -44,29 +42,34 @@ def check_machida_tennis(target_dates):
         current_step = "開始前"
         try:
             driver = get_driver()
-            wait = WebDriverWait(driver, 30) # 最大30秒待機
+            wait = WebDriverWait(driver, 30)
             
             # Step 1: トップページ
             current_step = "1.トップページ読み込み"
             print(f"[Log] {current_step}", flush=True)
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # Step 2: 高機能検索への遷移 (リトライ付)
+            # Step 2: 高機能検索への遷移
             current_step = "2.高機能検索ボタン押下"
             print(f"[Log] {current_step}", flush=True)
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "a")))
             driver.execute_script("location.href='P_A_Select_A.aspx';")
             
-            # Step 3: 施設選択 (見つかるまで最大10回リトライ)
+            # --- デバッグ用：遷移後の状態確認 ---
+            time.sleep(5) 
+            print(f"[Debug] 現在のURL: {driver.current_url}", flush=True)
+            print(f"[Debug] 画面タイトル: {driver.title}", flush=True)
+            # ----------------------------------
+
+            # Step 3: 施設選択
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
+            
             success_selection = False
             for i in range(10):
-                time.sleep(3) # 画面描画を待つ
                 labels = driver.find_elements(By.TAG_NAME, "label")
                 if len(labels) > 0:
                     for label in labels:
-                        # 「テニスコート」を含み「コミュニティ」を含まない項目を選択
                         if "テニスコート" in label.text and "コミュニティ" not in label.text:
                             label_id = label.get_attribute("for")
                             if label_id:
@@ -74,11 +77,17 @@ def check_machida_tennis(target_dates):
                                 if not cb.is_selected():
                                     driver.execute_script("arguments[0].click();", cb)
                                     success_selection = True
-                    if success_selection: break
-                print(f"[Log] {current_step} リトライ中...({i+1}/10)", flush=True)
+                    if success_selection: 
+                        print(f"[Log] {current_step} 成功", flush=True)
+                        break
+                else:
+                    # ラベルが1つも見つからない場合、HTML構造を一部出力
+                    body_text = driver.find_element(By.TAG_NAME, "body").text[:100].replace('\n', ' ')
+                    print(f"[Log] {current_step} リトライ中...({i+1}/10) 内容控え: {body_text}", flush=True)
+                time.sleep(3)
 
             if not success_selection:
-                raise Exception("施設リストが読み込めませんでした")
+                raise Exception(f"施設リストが見つかりません (URL: {driver.current_url})")
 
             # Step 4: 空き照会ボタン
             current_step = "4.空き照会ボタン押下"
@@ -94,10 +103,9 @@ def check_machida_tennis(target_dates):
             day_wd = wd_names[target_date.weekday()]
             date_str = target_date.strftime("%m/%d")
             
-            # 日付リンク（例: 「6水」）を探してクリック
             cal_xpath = f"//a[contains(., '{day_num}') and contains(., '{day_wd}')]"
-            day_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, cal_xpath)))
-            driver.execute_script("arguments[0].click();", day_links[0])
+            day_link = wait.until(EC.element_to_be_clickable((By.XPATH, cal_xpath)))
+            driver.execute_script("arguments[0].click();", day_link)
             
             # Step 6: 次へ
             current_step = "6.次へボタン押下"
@@ -113,7 +121,6 @@ def check_machida_tennis(target_dates):
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
                 if "○" in r.text:
-                    # 改行を消して1行にまとめる
                     clean_text = r.text.replace("\n", " ").strip()
                     slots.append(f"■ {clean_text}")
             
@@ -122,12 +129,15 @@ def check_machida_tennis(target_dates):
 
         except Exception as e:
             print(f"[Error] {current_step}: {str(e)}", flush=True)
-            all_results.append(f"【{target_date.strftime('%m/%d')}】エラーが発生しました")
+            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}")
         finally:
             if driver: driver.quit()
 
     return "\n\n".join(all_results)
 
+# ---------------------------------------------------------
+# LINE Bot 側の処理 (変更なし)
+# ---------------------------------------------------------
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
@@ -143,7 +153,6 @@ def handle_message(event):
     msg = event.message.text
     if "今日" in msg or "明日" in msg:
         today = datetime.now()
-        # メッセージに応じて今日か明日かを判定
         target_dates = [today] if "今日" in msg else [today + timedelta(days=1)]
         result = check_machida_tennis(target_dates)
         
