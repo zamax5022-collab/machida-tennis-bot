@@ -9,107 +9,93 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+app = Flask(__name__)
+
+# 環境変数（Renderで設定したもの）
+access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
+
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, ReplyMessageRequest, TextMessage
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-app = Flask(__name__)
-
-# 環境変数
-access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
-
-@app.route("/", methods=['GET'])
-def health_check():
-    return "Bot is active", 200
 
 def get_driver():
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1280,1024')
-    chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     return webdriver.Chrome(options=chrome_options)
 
 def check_machida_tennis(target_dates):
-    wd_names = ["月", "火", "水", "木", "金", "土", "日"]
     all_results = []
+    wd_names = ["月", "火", "水", "木", "金", "土", "日"]
 
     for target_date in target_dates:
         driver = None
         current_step = "初期化"
         try:
-            print(f"[Log] 検索開始: {target_date.strftime('%m/%d')}", flush=True)
             driver = get_driver()
-            wait = WebDriverWait(driver, 30)
+            wait = WebDriverWait(driver, 20)
             
-            # Step 1-3: 施設選択まで
+            # Step 1-4: 施設選択・空き照会ボタン（ここは成功実績あり）
             driver.get("https://www.pf489.com/machida/dselect.html")
-            search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
+            search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索')]")))
             driver.execute_script("arguments[0].click();", search_links[0])
             
-            time.sleep(5)
-            labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
+            time.sleep(3)
+            labels = driver.find_elements(By.TAG_NAME, "label")
             for label in labels:
                 if "テニスコート" in label.text and "コミュニティ" not in label.text:
                     label_id = label.get_attribute("for")
                     if label_id:
                         cb = driver.find_element(By.ID, label_id)
-                        if not cb.is_selected():
-                            driver.execute_script("arguments[0].click();", cb)
+                        if not cb.is_selected(): driver.execute_script("arguments[0].click();", cb)
             
-            # Step 4: 空き照会ボタン
-            current_step = "4.空き照会ボタン押下"
-            time.sleep(5)
-            btn_clicked = False
+            time.sleep(3)
             btns = driver.find_elements(By.TAG_NAME, "input")
             for b in btns:
-                val = b.get_attribute("value")
-                if val and "空き照会" in val:
+                if "空き照会" in (b.get_attribute("value") or ""):
                     driver.execute_script("arguments[0].click();", b)
-                    btn_clicked = True
                     break
-            
-            # Step 5: 日付選択
+
+            # Step 5: 日付選択（画像に基づき修正）
             current_step = "5.カレンダー日付選択"
-            time.sleep(10) # 画面遷移をじっくり待つ
+            time.sleep(8)
             
             day_num = str(target_date.day)
+            # 画像の構造：日付の数字(7)の下にある「×」や「△」のリンクを探す
+            # aタグの中で、onclick属性にその日付(20260507等)が含まれるものを探す
+            date_str = target_date.strftime('%Y%m%d')
             target_link = None
+            
             links = driver.find_elements(By.TAG_NAME, "a")
             for l in links:
-                txt = l.text.strip()
-                # 日付リンク（例: "7" や "7(木)"）を特定
-                if txt.startswith(day_num) and (len(txt) == len(day_num) or not txt[len(day_num)].isdigit()):
+                href = l.get_attribute("href") or ""
+                onclick = l.get_attribute("onclick") or ""
+                if date_str in href or date_str in onclick:
                     target_link = l
                     break
             
             if target_link:
                 driver.execute_script("arguments[0].click();", target_link)
             else:
-                # すでに次画面（時間帯選択）に飛んでいるか確認
-                if "利用目的" not in driver.page_source:
-                    raise Exception(f"{day_num}日のリンクがありません")
+                raise Exception(f"{day_num}日のリンク（記号部分）が見つかりません")
             
-            # Step 6: 次へ（または表示）
-            current_step = "6.次へ/表示ボタン押下"
-            time.sleep(7) # 日付クリック後の更新を待つ
-            next_found = False
-            all_inputs = driver.find_elements(By.TAG_NAME, "input")
-            for inp in all_inputs:
-                v = inp.get_attribute("value")
-                if v in ["次へ", "表示", "空き状況を表示"]:
-                    driver.execute_script("arguments[0].click();", inp)
-                    next_found = True
-                    break
+            # Step 6: 次へ
+            current_step = "6.次画面へ遷移"
+            time.sleep(5)
+            # ページ内に「次へ」や「表示」ボタンがあれば押す
+            next_btns = driver.find_elements(By.XPATH, "//input[@value='次へ' or @value='表示' or @value='空き状況を表示']")
+            if next_btns:
+                driver.execute_script("arguments[0].click();", next_btns[0])
             
             # Step 7: 結果抽出
             current_step = "7.結果抽出"
-            time.sleep(7)
+            time.sleep(5)
             slots = []
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
@@ -122,10 +108,7 @@ def check_machida_tennis(target_dates):
             all_results.append(res)
 
         except Exception as e:
-            # エラーの詳細をLINEに返す形式に変更
-            err_detail = str(e).split('\n')[0] # 1行目のみ抽出
-            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}\n内容：{err_detail}")
-            print(traceback.format_exc(), flush=True)
+            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}\n内容：{str(e)[:50]}")
         finally:
             if driver: driver.quit()
 
@@ -146,25 +129,10 @@ def handle_message(event):
     msg = event.message.text
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        try:
-            if "今日" in msg or "明日" in msg:
-                today = datetime.now()
-                target_dates = [today] if "今日" in msg else [today + timedelta(days=1)]
-                result = check_machida_tennis(target_dates)
-                line_bot_api.reply_message(ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=result)]
-                ))
-            else:
-                line_bot_api.reply_message(ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="「今日」または「明日」と入力してください。")]
-                ))
-        except Exception:
-            line_bot_api.reply_message(ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="重大なシステムエラーが発生しました。")]
-            ))
+        if "今日" in msg or "明日" in msg:
+            target_dates = [datetime.now()] if "今日" in msg else [datetime.now() + timedelta(days=1)]
+            result = check_machida_tennis(target_dates)
+            line_bot_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=result)]))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
