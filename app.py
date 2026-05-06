@@ -32,26 +32,22 @@ def get_driver():
 
 def scrap_and_push(user_id, target_date):
     driver = None
-    date_str = target_date.strftime('%Y%m%d') # 例: 20260507
+    date_str = target_date.strftime('%Y%m%d')
     try:
         driver = get_driver()
         wait = WebDriverWait(driver, 20)
         
-        # 1. サイトアクセス
+        # 1-4. 検索手順
         driver.get("https://www.pf489.com/machida/dselect.html")
-        
-        # 2. 高機能検索
         search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., '高機能検索')]")))
         driver.execute_script("arguments[0].click();", search_btn)
         
-        # 3. 施設選択（テニスコート）
         time.sleep(4)
         labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
         for label in labels:
             if "テニスコート" in label.text and "コミュニティ" not in label.text:
                 driver.execute_script("arguments[0].click();", driver.find_element(By.ID, label.get_attribute("for")))
         
-        # 4. 空き照会ボタン
         time.sleep(2)
         btns = driver.find_elements(By.TAG_NAME, "input")
         for b in btns:
@@ -59,10 +55,8 @@ def scrap_and_push(user_id, target_date):
                 driver.execute_script("arguments[0].click();", b)
                 break
 
-        # 5. カレンダー画面（画像 image_78376e.png の難所）
+        # 5. カレンダー画面
         time.sleep(10)
-        
-        # 強力なJavaScript実行：日付文字列が含まれるリンクを全探索して実行
         js_click_script = f"""
         var dateStr = '{date_str}';
         var links = document.getElementsByTagName('a');
@@ -70,46 +64,48 @@ def scrap_and_push(user_id, target_date):
             var href = links[i].getAttribute('href') || "";
             var onclick = links[i].getAttribute('onclick') || "";
             if (href.includes(dateStr) || onclick.includes(dateStr)) {{
-                // リンクを直接クリック
                 links[i].click();
                 return true;
             }}
         }}
         return false;
         """
-        success = driver.execute_script(js_click_script)
-        
-        if not success:
+        if not driver.execute_script(js_click_script):
             raise Exception(f"{date_str}の予約リンクが見つかりません。")
 
-        # 6. 結果抽出（時間帯選択画面）
+        # 6. 結果抽出（文字数オーバー対策）
         time.sleep(8)
         slots = []
-        # 「○」または「△」が含まれる行(tr)を抽出
         rows = driver.find_elements(By.XPATH, "//tr[contains(., '○') or contains(., '△')]")
         
-        current_park = "不明な公園"
+        current_park = "施設不明"
         for r in rows:
             txt = r.text.replace("\n", " ").strip()
-            # 公園名が含まれる行があれば更新（前後の文脈保持のため）
+            # 公園名を特定
             if "公園" in txt and "テニスコート" in txt:
                 current_park = txt.split(" ")[0]
             
+            # 「○」があるデータだけをコンパクトに保存
             if "○" in txt or "△" in txt:
-                slots.append(f"【{current_park}】\n{txt}")
+                slots.append(f"【{current_park}】{txt}")
+
+        # LINEの5000文字制限に合わせ、安全のため4000文字でカット
+        content = "\n\n".join(slots)
+        if len(content) > 4000:
+            content = content[:4000] + "\n...(以下略。空きが多すぎるため一部のみ表示します)"
 
         if slots:
-            final_msg = f"🎾 {target_date.strftime('%m/%d')}の空き状況です：\n\n" + "\n\n".join(slots)
+            final_msg = f"🎾 {target_date.strftime('%m/%d')}の空き状況です：\n\n" + content
         else:
-            final_msg = f"📅 {target_date.strftime('%m/%d')}の空き（○・△）はありませんでした。"
+            final_msg = f"📅 {target_date.strftime('%m/%d')}の空きはありませんでした。"
         
     except Exception as e:
-        final_msg = f"⚠️ 取得エラー\n日付: {date_str}\n内容: {str(e)[:150]}"
+        final_msg = f"⚠️ エラー\n内容: {str(e)[:100]}"
     finally:
         if driver:
             driver.quit()
 
-    # 結果をプッシュ送信
+    # LINE送信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.push_message(PushMessageRequest(
@@ -131,27 +127,15 @@ def callback():
 def handle_message(event):
     msg = event.message.text
     user_id = event.source.user_id
-    
     if "今日" in msg or "明日" in msg:
         target_date = datetime.now() if "今日" in msg else datetime.now() + timedelta(days=1)
-        
-        # LINEへの即時返答
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"🔍 {target_date.strftime('%m/%d')}の空き状況を確認しています。1分ほどお待ちください。")]
+                messages=[TextMessage(text=f"🔍 {target_date.strftime('%m/%d')}を検索中です。1分ほどお待ちください。")]
             ))
-        
-        # バックグラウンド処理開始
         threading.Thread(target=scrap_and_push, args=(user_id, target_date)).start()
-    else:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="「明日」または「今日」と送ってください。")]
-            ))
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
