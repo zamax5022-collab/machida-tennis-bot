@@ -15,7 +15,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# 環境変数（RenderのDashboardで設定してください）
+# 環境変数
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -52,7 +52,7 @@ def check_machida_tennis(target_dates):
             current_step = "1.トップページ読み込み"
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # Step 2: 高機能検索ボタン押下（物理クリック再現）
+            # Step 2: 高機能検索ボタン押下
             current_step = "2.高機能検索ボタン特定"
             search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
             driver.execute_script("arguments[0].click();", search_links[0])
@@ -104,7 +104,9 @@ def check_machida_tennis(target_dates):
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
                 if "○" in r.text:
-                    slots.append(f"■ {r.text.replace('\n', ' ').strip()}")
+                    # 修正点：f-string内でのバックスラッシュを回避
+                    row_text = r.text.replace("\n", " ").strip()
+                    slots.append(f"■ {row_text}")
             
             res = f"【{target_date.strftime('%m/%d')}】\n" + ("\n".join(slots) if slots else "空きなし")
             all_results.append(res)
@@ -112,7 +114,7 @@ def check_machida_tennis(target_dates):
         except Exception as e:
             error_msg = f"[Error] {current_step}: {str(e)}"
             print(error_msg, flush=True)
-            all_results.append(f"【{target_date.strftime('%m/%d')}】でエラーが発生しました。\nステップ: {current_step}")
+            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}")
         finally:
             if driver: driver.quit()
 
@@ -133,20 +135,15 @@ def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     msg = event.message.text
-    print(f"[Log] ユーザーメッセージ受信: {msg}", flush=True)
+    print(f"[Log] 受信: {msg}", flush=True)
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         
         try:
             if "今日" in msg or "明日" in msg:
-                # 検索の実行
                 today = datetime.now()
                 target_dates = [today] if "今日" in msg else [today + timedelta(days=1)]
-                
-                # 検索中のログ
-                print(f"[Log] 検索を開始します対象: {msg}", flush=True)
-                
                 result = check_machida_tennis(target_dates)
                 line_bot_api.reply_message(ReplyMessageRequest(
                     reply_token=event.reply_token,
@@ -158,12 +155,11 @@ def handle_message(event):
                     messages=[TextMessage(text="「今日」または「明日」と送ってください。")]
                 ))
         except Exception as e:
-            # 内部で発生したすべてのエラーをLINEに送信
             error_detail = traceback.format_exc()
-            print(f"[Critical] Handle Message Error:\n{error_detail}", flush=True)
+            print(f"[Critical] Handle Error:\n{error_detail}", flush=True)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"申し訳ありません、Bot内部でエラーが発生しました。\n\n{str(e)}")]
+                messages=[TextMessage(text=f"Bot内部エラー:\n{str(e)}")]
             ))
 
 if __name__ == "__main__":
