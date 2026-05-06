@@ -30,6 +30,7 @@ def get_driver():
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--disable-gpu')
     chrome_options.add_argument('--window-size=1280,1024')
+    # 町田市のサーバーに蹴られないよう、一般的なブラウザのふりをする設定
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     return webdriver.Chrome(options=chrome_options)
 
@@ -42,32 +43,43 @@ def check_machida_tennis(target_dates):
         current_step = "開始前"
         try:
             driver = get_driver()
-            wait = WebDriverWait(driver, 25)
+            wait = WebDriverWait(driver, 20)
             
-            # Step 1-2: リンククリックを止め、直接施設選択ページへアクセス
-            current_step = "1.施設選択ページへ直接アクセス"
+            # Step 1: トップページ
+            current_step = "1.トップページ読み込み"
             print(f"[Log] {current_step}", flush=True)
-            driver.get("https://www.pf489.com/machida/P_A_Select_A.aspx")
-            time.sleep(4)
+            driver.get("https://www.pf489.com/machida/dselect.html")
+            time.sleep(3)
+            
+            # Step 2: 高機能検索への遷移
+            current_step = "2.高機能検索ボタン押下"
+            print(f"[Log] {current_step}", flush=True)
+            # aタグのクリックが効かない場合に備え、JSで直接リンク先へ飛ばす
+            driver.execute_script("location.href='P_A_Select_A.aspx';")
+            time.sleep(5)
             
             # Step 3: 施設選択
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
             
-            labels = driver.find_elements(By.TAG_NAME, "label")
-            for label in labels:
-                if "テニスコート" in label.text and "コミュニティ" not in label.text:
-                    label_id = label.get_attribute("for")
-                    if label_id:
-                        cb = driver.find_element(By.ID, label_id)
-                        if not cb.is_selected():
-                            driver.execute_script("arguments[0].click();", cb)
+            # テニスコートのチェックボックスを探してクリック
+            script = """
+            var labels = document.getElementsByTagName('label');
+            for(var i=0; i<labels.length; i++){
+                if(labels[i].innerText.includes('テニスコート') && !labels[i].innerText.includes('コミュニティ')){
+                    var targetId = labels[i].getAttribute('for');
+                    document.getElementById(targetId).click();
+                }
+            }
+            """
+            driver.execute_script(script)
+            time.sleep(2)
             
             # Step 4: 空き照会ボタン
             current_step = "4.空き照会ボタン押下"
             print(f"[Log] {current_step}", flush=True)
-            search_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='空き照会']")))
+            search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@value='空き照会']")))
             driver.execute_script("arguments[0].click();", search_btn)
             
             # Step 5: カレンダー日付選択
@@ -78,14 +90,15 @@ def check_machida_tennis(target_dates):
             day_wd = wd_names[target_date.weekday()]
             date_str = target_date.strftime("%m/%d")
             
-            cal_xpath = f"//a[contains(., '{day_num}') and contains(., '{day_wd}')]"
-            day_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, cal_xpath)))
-            driver.execute_script("arguments[0].click();", day_links[0])
+            # 日付リンクを探す（例： "6水"）
+            cal_xpath = f"//a[contains(text(), '{day_num}') and (contains(text(), '{day_wd}'))]"
+            day_link = wait.until(EC.element_to_be_clickable((By.XPATH, cal_xpath)))
+            driver.execute_script("arguments[0].click();", day_link)
             
             # Step 6: 次へ
             current_step = "6.次へボタン押下"
             print(f"[Log] {current_step}", flush=True)
-            next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='次へ']")))
+            next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@value='次へ']")))
             driver.execute_script("arguments[0].click();", next_btn)
             
             # Step 7: 結果抽出
