@@ -6,9 +6,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
 
-# Renderの環境に合わせたLINE SDKのインポート（v3対応）
+# LINE SDK v3
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
     Configuration, ApiClient, MessagingApi, ReplyMessageRequest,
@@ -19,7 +18,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# 環境変数から取得
+# 環境変数
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=access_token)
@@ -31,14 +30,24 @@ def check_machida_tennis(target_date):
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     
-    # Render環境用のChromeパス設定
+    # Render環境のパス設定
     chrome_bin = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
+    driver_path = "/opt/render/project/.render/chrome/opt/google/chrome/chromedriver"
+    
     if os.path.exists(chrome_bin):
         chrome_options.binary_location = chrome_bin
 
-    # WebDriverの起動
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    
+    # ドライバーの起動（バージョン不一致を避けるため直接パス指定）
+    try:
+        if os.path.exists(driver_path):
+            service = Service(executable_path=driver_path)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            # パスが見つからない場合は標準起動を試行
+            driver = webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        return f"ブラウザの起動に失敗しました: {str(e)}"
+
     day_num = str(target_date.day)
     wd_list = ["月", "火", "水", "木", "金", "土", "日"]
     day_wd = wd_list[target_date.weekday()]
@@ -58,7 +67,7 @@ def check_machida_tennis(target_date):
                 if "テニスコート" in driver.page_source: break
             except: driver.switch_to.default_content()
 
-        # 施設選択ロジック（デスクトップ版の継承）
+        # 施設選択
         inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for ipt in inputs:
             try:
@@ -72,7 +81,7 @@ def check_machida_tennis(target_date):
         driver.execute_script("arguments[0].click();", search_btn)
         time.sleep(4)
 
-        # カレンダー画面
+        # カレンダー画面で日付をクリック
         header_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]"
         headers = driver.find_elements(By.XPATH, header_xpath)
         
@@ -94,7 +103,8 @@ def check_machida_tennis(target_date):
         if not clicked:
             return f"{date_str} の空きは見つかりませんでした。"
 
-        # 詳細画面解析（デスクトップ版の「次へ」ボタンクリックを再現）
+        # 詳細画面解析（「次へ」をクリック）
+        time.sleep(3)
         next_btns = driver.find_elements(By.XPATH, "//input[contains(@value, '次へ')] | //a[contains(., '次へ')]")
         if next_btns:
             driver.execute_script("arguments[0].click();", next_btns[-1])
@@ -106,12 +116,15 @@ def check_machida_tennis(target_date):
 
         for row in rows:
             text = row.text.strip()
+            # 施設名の更新
             if any(x in text for x in ["テニスコート", "グラウンド", "クリーンセンター"]) and "202" not in text:
                 current_facility = text.split(" ")[0].split("\n")[0]
                 continue
+            
             if "○" in text:
                 cells = row.find_elements(By.TAG_NAME, "td")
                 try:
+                    # 時間ヘッダーを探す
                     header_row = row.find_element(By.XPATH, "./preceding::tr[contains(., '～')][1]")
                     time_slots = [s for s in header_row.text.split() if "～" in s]
                     court_name = cells[0].text.strip().replace("\n", "")
@@ -122,15 +135,19 @@ def check_machida_tennis(target_date):
                             if 0 <= time_idx < len(time_slots):
                                 slot_time = time_slots[time_idx]
                                 start_hour = int(slot_time.split(":")[0])
+                                # 今日なら現時刻以前はスキップ
                                 if target_date.date() == datetime.now().date() and start_hour <= current_hour:
                                     continue
                                 unique_slots.add(f"■ {current_facility}/{court_name}：{slot_time}")
                 except: continue
 
-        return f"【{date_str} の空き】\n" + "\n".join(sorted(list(unique_slots))) if unique_slots else "空き枠はありませんでした。"
+        if not unique_slots:
+            return f"{date_str} の予約可能な空き枠はありませんでした。"
+        
+        return f"【{date_str} の空き状況】\n\n" + "\n".join(sorted(list(unique_slots)))
 
     except Exception as e:
-        return f"エラーが発生しました: {str(e)}"
+        return f"解析エラーが発生しました: {str(e)}"
     finally:
         driver.quit()
 
@@ -154,11 +171,14 @@ def handle_message(event):
     if target_date:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
+            # 最初の応答
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[MessagingTextMessage(text=f"{target_date.strftime('%m/%d')}を調べています。少々お待ちください...")]
+                messages=[MessagingTextMessage(text=f"{target_date.strftime('%m/%d')}を調べています。15〜20秒ほどお待ちください。")]
             ))
+            # 重い処理
             result = check_machida_tennis(target_date)
+            # プッシュメッセージで結果を送信
             line_bot_api.push_message(PushMessageRequest(
                 to=event.source.user_id,
                 messages=[MessagingTextMessage(text=result)]
