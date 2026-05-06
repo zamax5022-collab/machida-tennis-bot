@@ -22,9 +22,11 @@ handler = WebhookHandler(channel_secret)
 
 @app.route("/", methods=['GET'])
 def health_check():
-    return "OK", 200
+    """Renderからの生存確認用窓口"""
+    return "Bot is active", 200
 
 def get_driver():
+    """Chromeの起動設定"""
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
@@ -42,23 +44,27 @@ def check_machida_tennis(target_dates):
         current_step = "開始前"
         try:
             driver = get_driver()
-            wait = WebDriverWait(driver, 20)
+            # ネットワーク遅延を考慮し、待機時間を30秒に設定
+            wait = WebDriverWait(driver, 30)
             
-            # Step 1: トップページ
+            # Step 1: トップページ（セッション確立）
             current_step = "1.トップページ読み込み"
             print(f"[Log] {current_step}", flush=True)
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # Step 2: 高機能検索への強制遷移（JavaScriptを使用）
+            # Step 2: 高機能検索への強制遷移
+            # 不安定なフレーム切り替えを避け、JavaScriptで直接ページを書き換える
             current_step = "2.高機能検索ページへ直接遷移"
             print(f"[Log] {current_step}", flush=True)
             driver.execute_script("location.href='P_A_Select_A.aspx';")
-            time.sleep(5) 
-
-            # Step 3: 施設選択
+            
+            # Step 3: 施設選択（読み込み待ちを強化）
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
+            
+            # 「テニスコート」という文字を持つ要素が現れるまで最大30秒待機
+            wait.until(EC.presence_of_element_located((By.XPATH, "//label[contains(text(), 'テニスコート')]")))
+            time.sleep(2) # 描画安定のためのバッファ
             
             labels = driver.find_elements(By.TAG_NAME, "label")
             target_found = False
@@ -75,7 +81,7 @@ def check_machida_tennis(target_dates):
             # Step 4: 検索実行
             current_step = "4.空き照会ボタン押下"
             print(f"[Log] {current_step}", flush=True)
-            search_btn = driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]")
+            search_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '空き照会')]")))
             driver.execute_script("arguments[0].click();", search_btn)
             
             # Step 5: カレンダー日付選択
@@ -108,7 +114,7 @@ def check_machida_tennis(target_dates):
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 if "○" in row.text:
-                    # バックスラッシュ問題を回避するため、一度変数に代入
+                    # f-string内でのバックスラッシュ回避
                     clean_text = row.text.replace('\n', ' ').strip()
                     unique_slots.append(f"■ {clean_text}")
 
@@ -128,7 +134,7 @@ def check_machida_tennis(target_dates):
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Signature', request.headers.get('X-Line-Signature'))
+    signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -141,9 +147,13 @@ def handle_message(event):
     user_msg = event.message.text
     if "今日" not in user_msg and "明日" not in user_msg:
         return
+
     today = datetime.now()
+    # 必要に応じて日本時間調整 (today + timedelta(hours=9))
     target_dates = [today] if "今日" in user_msg else [today + timedelta(days=1)]
+    
     result = check_machida_tennis(target_dates)
+    
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
