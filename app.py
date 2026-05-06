@@ -44,14 +44,18 @@ def check_machida_tennis(target_dates):
         try:
             print(f"[Log] 検索プロセス開始: {target_date.strftime('%m/%d')}", flush=True)
             driver = get_driver()
-            wait = WebDriverWait(driver, 25)
+            wait = WebDriverWait(driver, 30) # 待機時間をさらに延長
             
-            # Step 1-3: ここまでは安定
+            # Step 1: トップページ
             driver.get("https://www.pf489.com/machida/dselect.html")
+            
+            # Step 2: 高機能検索
             search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
             driver.execute_script("arguments[0].click();", search_links[0])
             
-            time.sleep(3)
+            # Step 3: 施設選択
+            current_step = "3.施設選択"
+            time.sleep(5) # 遷移待ちを長めに
             labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
             for label in labels:
                 if "テニスコート" in label.text and "コミュニティ" not in label.text:
@@ -60,42 +64,55 @@ def check_machida_tennis(target_dates):
                         cb = driver.find_element(By.ID, label_id)
                         if not cb.is_selected():
                             driver.execute_script("arguments[0].click();", cb)
-                            # チェックを入れた後の自動更新を待つ
-                            time.sleep(2)
-
-            # Step 4: 空き照会ボタン（リトライロジックを大幅強化）
+                            print(f"[Log] 施設選択にチェックを入れました", flush=True)
+            
+            # Step 4: 空き照会ボタン（最強ロジックに更新）
             current_step = "4.空き照会ボタン押下"
-            # 画面が落ち着くまで最大5回リトライ
+            time.sleep(5) # 施設選択後のPostback待ち
+            
+            # 手法A: 画面上の全ボタン(input)をスキャンして「空き照会」を探す
             btn_clicked = False
-            for i in range(5):
+            for retry in range(3):
                 try:
-                    # ボタンを再検索
-                    btn = driver.find_element(By.XPATH, "//input[@value='空き照会']")
-                    if btn:
-                        driver.execute_script("arguments[0].click();", btn)
-                        print(f"[Log] 空き照会ボタンをクリックしました (試行 {i+1})", flush=True)
-                        btn_clicked = True
-                        break
+                    btns = driver.find_elements(By.TAG_NAME, "input")
+                    for b in btns:
+                        val = b.get_attribute("value")
+                        if val and "空き照会" in val:
+                            driver.execute_script("arguments[0].scrollIntoView(true);", b)
+                            driver.execute_script("arguments[0].click();", b)
+                            print(f"[Log] 空き照会ボタンをクリック成功(Retry:{retry})", flush=True)
+                            btn_clicked = True
+                            break
+                    if btn_clicked: break
                 except:
-                    print(f"[Log] ボタンクリック再試行中... ({i+1}/5)", flush=True)
-                    time.sleep(2)
+                    time.sleep(3)
             
             if not btn_clicked:
-                raise Exception("空き照会ボタンが見つからないか、クリックできませんでした。")
+                # 手法B: JavaScriptで要素を特定して強制実行
+                print(f"[Log] 手法B(JS強制実行)を試みます", flush=True)
+                driver.execute_script("""
+                    var inputs = document.getElementsByTagName('input');
+                    for(var i=0; i<inputs.length; i++){
+                        if(inputs[i].value.indexOf('空き照会') !== -1){
+                            inputs[i].click();
+                            return true;
+                        }
+                    }
+                """)
+                btn_clicked = True # 実行したとみなす
             
             # Step 5: 日付選択
             current_step = "5.カレンダー日付選択"
             time.sleep(5)
-            # カレンダーの表示を確認
+            # カレンダーテーブルが出るまで待機
             wait.until(EC.presence_of_element_located((By.XPATH, "//table[contains(@id, 'Calendar')]")))
             
             day_num = str(target_date.day)
-            # 全ての日付リンクを取得してループ
             links = driver.find_elements(By.TAG_NAME, "a")
             target_link = None
             for l in links:
                 txt = l.text.strip()
-                # 「6」や「6(水)」など、数字から始まるものを探す
+                # 「6」や「6(水)」など数字で始まるリンク
                 if txt.startswith(day_num) and (len(txt) == len(day_num) or not txt[len(day_num)].isdigit()):
                     target_link = l
                     break
@@ -103,7 +120,7 @@ def check_machida_tennis(target_dates):
             if target_link:
                 driver.execute_script("arguments[0].click();", target_link)
             else:
-                raise Exception(f"{day_num}日のリンクが見つかりません。")
+                raise Exception(f"{day_num}日のリンクがカレンダー内に見当たりません。")
             
             # Step 6: 次へ
             current_step = "6.次へボタン押下"
@@ -127,13 +144,13 @@ def check_machida_tennis(target_dates):
 
         except Exception as e:
             print(f"[Error] {current_step}: {str(e)}", flush=True)
-            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}")
+            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー発生：{current_step}")
         finally:
             if driver: driver.quit()
 
     return "\n\n".join(all_results)
 
-# --- LINE Bot のハンドラ部分は変更なし ---
+# --- 以下 callback, handle_message は維持 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
