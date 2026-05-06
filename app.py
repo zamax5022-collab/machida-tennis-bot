@@ -21,6 +21,7 @@ configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
 def get_driver():
+    print("[Log] Chromeを起動中...")
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
@@ -34,125 +35,125 @@ def check_machida_tennis(target_dates):
     all_results = []
 
     for target_date in target_dates:
-        driver = get_driver()
-        wait = WebDriverWait(driver, 25)
-        
-        day_num = str(target_date.day)
-        day_wd = wd_names[target_date.weekday()]
+        driver = None
+        current_step = "開始前"
         date_str = target_date.strftime("%m/%d")
-        unique_slots = set()
-        current_hour = datetime.now().hour if target_date.date() == datetime.now().date() else -1
-
+        day_wd = wd_names[target_date.weekday()]
+        
         try:
-            print(f"--- 検索開始: {date_str} ---")
-            # 1. トップページから入る（セッション確立）
-            driver.get("https://www.pf489.com/machida/dselect.html")
-            time.sleep(2)
-
-            # 2. 高機能検索を確実にクリック
-            print("Step 1: 高機能検索へ移動中...")
-            try:
-                high_func_link = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "高機能検索")))
-                driver.execute_script("arguments[0].click();", high_func_link)
-            except:
-                # リンクが見つからない場合のバックアップ
-                driver.execute_script("location.href='P_A_Select_A.aspx';")
+            driver = get_driver()
+            wait = WebDriverWait(driver, 20)
             
-            # 3. フレームの出現を待って切り替え
-            print("Step 2: フレーム切り替え待ち...")
-            time.sleep(3)
+            # Step 1: トップページ
+            current_step = "1.トップページ読み込み"
+            print(f"[Log] {date_str} {current_step}")
+            driver.get("https://www.pf489.com/machida/dselect.html")
+            
+            # Step 2: 高機能検索ボタン
+            current_step = "2.高機能検索ボタン押下"
+            print(f"[Log] {current_step}")
+            high_func_link = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "高機能検索")))
+            driver.execute_script("arguments[0].click();", high_func_link)
+            
+            # Step 3: フレーム切り替え
+            current_step = "3.メインフレーム切り替え"
+            print(f"[Log] {current_step}")
+            time.sleep(2) # 遷移待ち
             wait.until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
 
-            # 4. 施設選択（テニスコート）
-            print("Step 3: 施設選択中...")
-            wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
-            labels = driver.find_elements(By.TAG_NAME, "label")
-            found_facility = False
+            # Step 4: 施設選択
+            current_step = "4.施設(テニス)選択"
+            print(f"[Log] {current_step}")
+            labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
+            target_found = False
             for label in labels:
                 if "テニスコート" in label.text and "コミュニティ" not in label.text:
                     checkbox = driver.find_element(By.ID, label.get_attribute("for"))
                     if not checkbox.is_selected():
                         driver.execute_script("arguments[0].click();", checkbox)
-                        found_facility = True
+                    target_found = True
             
-            if not found_facility:
-                raise Exception("テニスコートの選択肢が見つかりませんでした")
+            if not target_found:
+                raise Exception("テニスコートのチェックボックスが見つかりません")
 
-            # 5. 検索実行
+            # Step 5: 検索ボタン
+            current_step = "5.空き照会ボタン押下"
+            print(f"[Log] {current_step}")
             search_btn = driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]")
             driver.execute_script("arguments[0].click();", search_btn)
             
-            # 6. カレンダー解析
-            print("Step 4: カレンダー画面...")
-            time.sleep(4)
-            target_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]//a[contains(., '○') or contains(., '△')]"
+            # Step 6: カレンダー日付選択
+            current_step = "6.カレンダー日付選択"
+            print(f"[Log] {current_step}")
+            time.sleep(3)
+            day_num = str(target_date.day)
+            target_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]//a"
             day_links = driver.find_elements(By.XPATH, target_xpath)
             
             if not day_links:
-                all_results.append(f"【{date_str}({day_wd})】\n空きなし")
+                all_results.append(f"【{date_str}】空きなし(または選択不可)")
                 continue
-
             driver.execute_script("arguments[0].click();", day_links[0])
             
-            # 7. 次へボタン
+            # Step 7: 次へ
+            current_step = "7.次へボタン押下"
+            print(f"[Log] {current_step}")
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '次へ')]")))
             driver.execute_script("arguments[0].click();", next_btn)
             
-            # 8. 詳細結果取得
-            print("Step 5: 結果抽出中...")
-            time.sleep(3)
+            # Step 8: 結果抽出
+            current_step = "8.詳細データ抽出"
+            print(f"[Log] {current_step}")
+            time.sleep(2)
+            unique_slots = []
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 if "○" in row.text:
-                    text = row.text.replace("\n", " ").strip()
-                    try:
-                        time_part = text.split("～")[0][-2:].strip().replace(":", "")
-                        if time_part.isdigit() and int(time_part) > current_hour:
-                            unique_slots.add(f"■ {text}")
-                    except:
-                        unique_slots.add(f"■ {text}")
+                    unique_slots.append(f"■ {row.text.strip()}")
 
-            res_text = f"【{date_str}({day_wd})】\n" + ("\n".join(sorted(list(unique_slots))) if unique_slots else "空きなし")
-            all_results.append(res_text)
-            print(f"DONE: {date_str}")
-            
-        except Exception:
+            res = f"【{date_str}({day_wd})】\n" + ("\n".join(unique_slots) if unique_slots else "空きなし")
+            all_results.append(res)
+            print(f"[Log] {date_str} 完了")
+
+        except Exception as e:
+            error_msg = f"エラー発生(Step:{current_step}): {str(e)}"
+            print(f"[Error] {error_msg}")
             print(traceback.format_exc())
-            all_results.append(f"【{date_str}】検索エラー: サイトの応答待ちです。再度お試しください")
+            all_results.append(f"【{date_str}】{error_msg}")
         finally:
-            driver.quit()
+            if driver:
+                driver.quit()
 
     return "\n\n".join(all_results)
 
-# --- 以下、Flaskの基本設定（前回同様） ---
+# --- LINE Callback & Handler (前回同様) ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
-    except Exception:
+    except Exception as e:
+        print(f"Callback Error: {e}")
         abort(400)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_msg = event.message.text
+    if "今日" not in user_msg and "明日" not in user_msg:
+        return
+
     today = datetime.now()
-    target_dates = []
+    target_dates = [today] if "今日" in user_msg else [today + timedelta(days=1)]
     
-    if "今日" in user_msg: target_dates.append(today)
-    elif "明日" in user_msg: target_dates.append(today + timedelta(days=1))
-    elif "週末" in user_msg:
-        sat = today + timedelta(days=((5 - today.weekday() + 7) % 7 or 7))
-        target_dates.extend([sat, sat + timedelta(days=1)])
-
-    if not target_dates: return
-
     result = check_machida_tennis(target_dates)
+    
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=result)]))
+        line_bot_api.reply_message(
+            ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=result)])
+        )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
