@@ -15,6 +15,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
+# 環境変数
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=access_token)
@@ -32,11 +33,11 @@ def get_driver():
 def scrap_and_push(user_id, target_date):
     driver = None
     date_str = target_date.strftime('%Y%m%d')
-    day_val = str(target_date.day) # 「7」など
     try:
         driver = get_driver()
         wait = WebDriverWait(driver, 20)
         
+        # 1-4. 検索手順（省略せず確実に実行）
         driver.get("https://www.pf489.com/machida/dselect.html")
         search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., '高機能検索')]")))
         driver.execute_script("arguments[0].click();", search_btn)
@@ -54,55 +55,54 @@ def scrap_and_push(user_id, target_date):
                 driver.execute_script("arguments[0].click();", b)
                 break
 
+        # 5. カレンダー画面で日付をクリック
         time.sleep(10)
-        # カレンダーをクリックして詳細画面へ
         js_click = f"var d='{date_str}';var a=document.getElementsByTagName('a');for(var i=0;i<a.length;i++){{if((a[i].getAttribute('href')||'').includes(d)||(a[i].getAttribute('onclick')||'').includes(d)){{a[i].click();break;}}}}"
         driver.execute_script(js_click)
         
+        # 6. 時間帯別空き状況画面（ここが本番）
         time.sleep(8)
-        
-        # --- ここからデータ抽出の改善 ---
         slots = []
-        # 各施設ごとのテーブルブロックを取得
-        tables = driver.find_elements(By.XPATH, "//table[@width='100%' and .//th[contains(text(), '水') or contains(text(), '木')]]")
+        
+        # 画面内の全てのテーブルを解析
+        tables = driver.find_elements(By.XPATH, "//table[@bordercolor='#333399']")
         
         for table in tables:
             try:
-                # 施設名を探す（テーブルの直前にあることが多い）
-                park_name = table.find_element(By.XPATH, "./preceding::b[1]").text
-                if "テニスコート" not in park_name: continue
+                # 施設名を取得（テーブルの直前にあるリンクテキスト）
+                park_name = table.find_element(By.XPATH, "./preceding::a[contains(@id, 'LnkSisetu名')][1]").text
                 
-                # ターゲットの日付の列（thのテキストがday_valと一致する列番号）を特定
-                headers = table.find_elements(By.TAG_NAME, "th")
-                col_index = -1
-                for i, h in enumerate(headers):
-                    if h.text.strip() == day_val:
-                        col_index = i
-                        break
+                # 時間帯の見出し（9:00〜11:00など）を取得
+                time_headers = [th.text.replace("\n", "") for th in table.find_elements(By.XPATH, ".//tr[2]/th")]
                 
-                if col_index != -1:
-                    # その列にある「○」や「△」を探す
-                    cells = table.find_elements(By.TAG_NAME, "td")
-                    # row内の該当列のテキストを確認（簡易版）
-                    row_text = table.text
-                    if "○" in row_text or "△" in row_text:
-                        # 記号が含まれる場合のみリストに追加
-                        status = "空きあり！" if "○" in row_text else "一部空き"
-                        slots.append(f"📍 {park_name.split(' ')[0]}\n   状況: {status}")
+                # コート（A面、B面など）の行をループ
+                rows = table.find_elements(By.XPATH, ".//tr[position()>2]")
+                for row in rows:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if not cells: continue
+                    
+                    court_name = cells[0].text # A面、B面など
+                    
+                    # 各時間帯の「○」をチェック
+                    for i, cell in enumerate(cells[1:]):
+                        if i < len(time_headers) and ("○" in cell.text or "△" in cell.text):
+                            slots.append(f"📍{park_name}\n   └ {court_name}：{time_headers[i]}")
             except:
                 continue
 
         if slots:
-            final_msg = f"🎾 {target_date.strftime('%m/%d')}の空き状況\n\n" + "\n".join(slots)
-            final_msg += "\n\n※詳細は公式予約システムを確認してください。"
+            # 重複を除去して整理
+            unique_slots = list(dict.fromkeys(slots))
+            final_msg = f"🎾 {target_date.strftime('%m/%d')}の空き状況（○/△）\n\n" + "\n".join(unique_slots)
         else:
-            final_msg = f"📅 {target_date.strftime('%m/%d')}は、現在空きがありません。"
+            final_msg = f"📅 {target_date.strftime('%m/%d')}は空きがありませんでした。"
         
     except Exception as e:
-        final_msg = f"⚠️ 取得エラーが発生しました。\n(開発メモ: {str(e)[:50]})"
+        final_msg = f"⚠️ 取得エラーが発生しました。\n(詳細: {str(e)[:50]})"
     finally:
         if driver: driver.quit()
 
+    # プッシュ送信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=final_msg)]))
@@ -127,7 +127,7 @@ def handle_message(event):
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"🔍 {target_date.strftime('%m/%d')}を検索します。")]
+                messages=[TextMessage(text=f"🔍 {target_date.strftime('%m/%d')}のコート別詳細を調べています...")]
             ))
         threading.Thread(target=scrap_and_push, args=(user_id, target_date)).start()
 
