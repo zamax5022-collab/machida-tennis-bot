@@ -15,7 +15,6 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# 環境変数
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 configuration = Configuration(access_token=access_token)
@@ -26,69 +25,77 @@ def get_driver():
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu') # GPUを無効化してメモリ節約
+    chrome_options.add_argument('--memory-pressure-off') # メモリ制限対策
     chrome_options.add_argument('--window-size=1280,1024')
     return webdriver.Chrome(options=chrome_options)
 
 def scrap_and_push(user_id, target_date):
-    """バックグラウンドで実行されるメイン処理"""
     driver = None
+    date_str = target_date.strftime('%Y%m%d')
     try:
         driver = get_driver()
         wait = WebDriverWait(driver, 20)
-        date_str = target_date.strftime('%Y%m%d')
         
         # 1. サイトアクセス
         driver.get("https://www.pf489.com/machida/dselect.html")
         
-        # 2. 高機能検索（JavaScriptで即クリック）
+        # 2. 高機能検索
         search_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., '高機能検索')]")))
         driver.execute_script("arguments[0].click();", search_btn)
         
         # 3. 施設選択
-        time.sleep(3)
+        time.sleep(4)
         labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
         for label in labels:
             if "テニスコート" in label.text and "コミュニティ" not in label.text:
                 driver.execute_script("arguments[0].click();", driver.find_element(By.ID, label.get_attribute("for")))
         
         # 4. 空き照会ボタン
+        time.sleep(2)
         btns = driver.find_elements(By.TAG_NAME, "input")
         for b in btns:
             if "空き照会" in (b.get_attribute("value") or ""):
                 driver.execute_script("arguments[0].click();", b)
                 break
 
-        # 5. カレンダー画面での日付選択（画像に基づき記号を直接クリック）
-        time.sleep(7)
-        # onclickに '20260507' などの日付が含まれるリンク（×や△）を狙う
-        target_xpath = f"//a[contains(@onclick, '{date_str}')]"
-        target_link = wait.until(EC.presence_of_element_located((By.XPATH, target_xpath)))
-        driver.execute_script("arguments[0].click();", target_link)
+        # 5. カレンダー画面（ここが難所）
+        time.sleep(10) # 画面遷移をじっくり待つ
+        # onclick属性に日付が含まれる要素を直接JavaScriptで叩く（最も確実な方法）
+        js_click_script = f"""
+        var links = document.getElementsByTagName('a');
+        for (var i = 0; i < links.length; i++) {{
+            if (links[i].getAttribute('onclick') && links[i].getAttribute('onclick').includes('{date_str}')) {{
+                links[i].click();
+                return true;
+            }}
+        }}
+        return false;
+        """
+        success = driver.execute_script(js_click_script)
+        
+        if not success:
+            raise Exception(f"{date_str}の予約リンク（記号）が見つかりませんでした")
         
         # 6. 結果抽出（時間帯選択画面）
-        time.sleep(5)
+        time.sleep(7)
         slots = []
-        # 「○」が含まれるテーブル行(tr)をすべて取得
         rows = driver.find_elements(By.XPATH, "//tr[contains(., '○')]")
         for r in rows:
-            # 施設名や時間など、必要なテキストを整理
             txt = r.text.replace("\n", " ").strip()
-            slots.append(f"■ {txt}")
+            if txt: slots.append(f"■ {txt}")
 
         final_msg = f"【{target_date.strftime('%m/%d')}の空き状況】\n" + ("\n".join(slots) if slots else "空きはありませんでした。")
         
     except Exception as e:
-        final_msg = f"【エラー発生】\n手順：{date_str}の取得中\n内容：{str(e)[:100]}"
+        final_msg = f"【エラー詳細】\nステップ: {date_str}抽出中\n内容: {str(e)[:150]}"
     finally:
-        if driver: driver.quit()
+        if driver:
+            driver.quit()
 
-    # 結果をPush送信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        line_bot_api.push_message(PushMessageRequest(
-            to=user_id,
-            messages=[TextMessage(text=final_msg)]
-        ))
+        line_bot_api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=final_msg)]))
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -104,28 +111,15 @@ def callback():
 def handle_message(event):
     msg = event.message.text
     user_id = event.source.user_id
-    
     if "今日" in msg or "明日" in msg:
         target_date = datetime.now() if "今日" in msg else datetime.now() + timedelta(days=1)
-        
-        # 1. まず「受け付けた」ことを即レスポンス（LINEタイムアウト対策）
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"{target_date.strftime('%m/%d')}の空き状況を調べています...1分ほどお待ちください。")]
+                messages=[TextMessage(text=f"{target_date.strftime('%m/%d')}を検索中です。1分ほどで結果をプッシュ通知します。")]
             ))
-        
-        # 2. バックグラウンドで重い処理を開始
-        thread = threading.Thread(target=scrap_and_push, args=(user_id, target_date))
-        thread.start()
-    else:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            line_bot_api.reply_message(ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="「今日」または「明日」と送ってください。")]
-            ))
+        threading.Thread(target=scrap_and_push, args=(user_id, target_date)).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
