@@ -17,6 +17,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
+# --- LINE設定 (RenderのEnvironmentで設定済み) ---
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 
@@ -24,28 +25,29 @@ configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
 def get_driver():
+    """メモリを節約しつつブラウザを起動"""
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    # メモリ節約設定
     chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--window-size=1280,1024')
     return webdriver.Chrome(options=chrome_options)
 
 def check_machida_tennis(target_dates):
+    """町田市の複雑なサイト構造を解析する"""
     wd_names = ["月", "火", "水", "木", "金", "土", "日"]
     all_results = []
 
     for target_date in target_dates:
         driver = get_driver()
-        wait = WebDriverWait(driver, 15) # 最大15秒待機
+        wait = WebDriverWait(driver, 20) # 20秒まで待機を許可
         
         day_num = str(target_date.day)
         day_wd = wd_names[target_date.weekday()]
         date_str = target_date.strftime("%m/%d")
         unique_slots = set()
         
+        # 今日を検索する場合のみ、現在時刻より前の枠を除外
         current_hour = datetime.now().hour if target_date.date() == datetime.now().date() else -1
 
         try:
@@ -53,12 +55,16 @@ def check_machida_tennis(target_dates):
             
             # 高機能検索をクリック
             wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "高機能検索"))).click()
-            time.sleep(2)
+            time.sleep(4) 
             
-            # フレーム切り替え
-            wait.until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
+            # フレーム切り替え：町田市サイトの核となる「MainFrame」へ
+            try:
+                # 確実性を高めるため、インデックス[1]または名前で切り替え
+                wait.until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
+            except:
+                driver.switch_to.frame(1)
 
-            # 施設選択：テニスコートをチェック
+            # 施設選択：テニスコートを探してチェック
             checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
             for cb in checkboxes:
                 try:
@@ -68,12 +74,12 @@ def check_machida_tennis(target_dates):
                             driver.execute_script("arguments[0].click();", cb)
                 except: continue
 
-            # 空き照会
+            # 空き照会ボタン
             search_btn = driver.find_element(By.XPATH, "//input[contains(@value, '空き照会')]")
             driver.execute_script("arguments[0].click();", search_btn)
-            time.sleep(3)
+            time.sleep(5)
 
-            # カレンダーから対象日を探す
+            # カレンダーから対象日の○または△を探す
             target_xpath = f"//td[contains(., '{day_num}') and contains(., '{day_wd}')]//a[contains(., '○') or contains(., '△')]"
             day_links = driver.find_elements(By.XPATH, target_xpath)
             
@@ -83,25 +89,32 @@ def check_machida_tennis(target_dates):
 
             # 最初の○をクリック
             driver.execute_script("arguments[0].click();", day_links[0])
-            time.sleep(2)
-
-            # 次へボタン
-            next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@value, '次へ')]")))
-            driver.execute_script("arguments[0].click();", next_btn)
             time.sleep(3)
 
-            # 結果抽出
+            # 次へボタンをクリックして詳細画面へ
+            next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@value, '次へ')]")))
+            driver.execute_script("arguments[0].click();", next_btn)
+            time.sleep(5)
+
+            # 空き枠データの抽出
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 if "○" in row.text:
-                    text = row.text.replace("\n", " ")
-                    unique_slots.add(f"■ {text}")
+                    # 施設名やコート名、時間帯を整形
+                    text = row.text.replace("\n", " ").strip()
+                    # 既に過去の時間の枠はスキップ
+                    try:
+                        time_part = text.split("～")[0][-2:] # 時間の開始時刻を取得
+                        if int(time_part) > current_hour:
+                            unique_slots.add(f"■ {text}")
+                    except:
+                        unique_slots.add(f"■ {text}")
 
-            res_text = f"【{date_str}({day_wd})】\n" + ("\n".join(sorted(list(unique_slots))) if unique_slots else "詳細条件に空きなし")
+            res_text = f"【{date_str}({day_wd})】\n" + ("\n".join(sorted(list(unique_slots))) if unique_slots else "空きなし")
             all_results.append(res_text)
             
         except Exception as e:
-            all_results.append(f"【{date_str}】検索エラー: タイムアウトまたはサイト構成変更")
+            all_results.append(f"【{date_str}】検索エラー: サイト混雑または構成変更")
         finally:
             driver.quit()
 
@@ -119,6 +132,7 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
+    """ユーザーからの言葉に合わせて検索日を決定"""
     user_msg = event.message.text
     today = datetime.now()
     target_dates = []
@@ -137,6 +151,7 @@ def handle_message(event):
     else:
         for key, val in wd_map.items():
             if key in user_msg:
+                # 今日を含まない「次の〇曜日」を計算
                 diff = (val - today.weekday() + 7) % 7
                 days_to_add = diff if diff > 0 else 7
                 target_dates.append(today + timedelta(days=days_to_add))
@@ -144,8 +159,10 @@ def handle_message(event):
 
     if not target_dates: return
 
-    # 返信
+    # 解析実行
     result = check_machida_tennis(target_dates)
+    
+    # LINEへ返信
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
@@ -156,5 +173,6 @@ def handle_message(event):
         )
 
 if __name__ == "__main__":
+    # Renderのデフォルトポート10000を使用
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
