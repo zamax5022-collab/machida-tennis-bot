@@ -49,29 +49,24 @@ def check_machida_tennis(target_dates):
             current_step = "1.トップページ読み込み"
             print(f"[Log] {current_step}", flush=True)
             driver.get("https://www.pf489.com/machida/dselect.html")
-            time.sleep(2)
             
             # Step 2: 直接遷移
             current_step = "2.高機能検索ページへ直接遷移"
             print(f"[Log] {current_step}", flush=True)
             driver.execute_script("location.href='https://www.pf489.com/machida/P_A_Select_A.aspx';")
             
-            # Step 3: 施設選択（デバッグログ強化）
+            # Step 3: 施設選択
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
-            
             wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
-            
-            # ラベル要素が最低1つ現れるのを待つ
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
-            time.sleep(5) # 描画安定のためのバッファ
+            time.sleep(5)
             
             labels = driver.find_elements(By.TAG_NAME, "label")
             print(f"[Debug] 見つかった全ラベル数: {len(labels)}", flush=True)
             
             target_count = 0
             selected_count = 0
-            
             for label in labels:
                 label_text = label.text
                 if "テニスコート" in label_text and "コミュニティ" not in label_text:
@@ -87,16 +82,12 @@ def check_machida_tennis(target_dates):
                             else:
                                 selected_count += 1
                                 print(f"[Debug] 既に選択済み: {label_text}", flush=True)
-                        except Exception as e:
-                            print(f"[Debug] 選択失敗({label_text}): {str(e)[:50]}", flush=True)
+                        except Exception as click_err:
+                            print(f"[Debug] 選択失敗({label_text}): {str(click_err)[:30]}", flush=True)
             
             print(f"[Log] 判定結果: 対象施設={target_count}, 選択済み={selected_count}", flush=True)
-            
             if target_count == 0:
-                # 0件だった場合、何が見えていたのかを確認するため最初の5件を表示
-                sample_labels = [l.text for l in labels[:5]]
-                print(f"[Debug] ラベルサンプル: {sample_labels}", flush=True)
-                raise Exception("テニスコートの文字列を含む施設が見つかりません")
+                raise Exception("テニスコートが見つかりません")
 
             # Step 4: 検索実行
             current_step = "4.空き照会ボタン押下"
@@ -126,11 +117,18 @@ def check_machida_tennis(target_dates):
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[contains(@value, '次へ')]")))
             driver.execute_script("arguments[0].click();", next_btn)
             
-            # Step 7: 結果抽出
+            # Step 7: 結果抽出（SyntaxErrorを修正）
             current_step = "7.詳細データ抽出"
             print(f"[Log] {current_step}", flush=True)
             time.sleep(4)
-            slots = [f"■ {r.text.replace('\n', ' ').strip()}" for r in driver.find_elements(By.TAG_NAME, "tr") if "○" in r.text]
+            
+            slots = []
+            rows = driver.find_elements(By.TAG_NAME, "tr")
+            for r in rows:
+                if "○" in r.text:
+                    # 改行置換をf-stringの外側で行う
+                    clean_text = r.text.replace("\n", " ").strip()
+                    slots.append(f"■ {clean_text}")
             
             res = f"【{date_str}({day_wd})】\n" + ("\n".join(slots) if slots else "空きなし")
             all_results.append(res)
@@ -145,7 +143,7 @@ def check_machida_tennis(target_dates):
 
     return "\n\n".join(all_results)
 
-# --- 以下、LINE連携部分は変更なし ---
+# --- LINE Callback & Handler (変更なし) ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
@@ -158,9 +156,10 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
-    if "今日" in event.message.text or "明日" in event.message.text:
+    msg = event.message.text
+    if "今日" in msg or "明日" in msg:
         today = datetime.now()
-        target_dates = [today] if "今日" in event.message.text else [today + timedelta(days=1)]
+        target_dates = [today] if "今日" in msg else [today + timedelta(days=1)]
         result = check_machida_tennis(target_dates)
         with ApiClient(configuration) as api_client:
             MessagingApi(api_client).reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=result)]))
