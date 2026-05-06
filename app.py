@@ -44,22 +44,20 @@ def check_machida_tennis(target_dates):
             driver = get_driver()
             wait = WebDriverWait(driver, 20)
             
-            # Step 1: トップページ（セッション確立）
+            # Step 1: トップページ
             current_step = "1.トップページ読み込み"
             print(f"[Log] {current_step}", flush=True)
             driver.get("https://www.pf489.com/machida/dselect.html")
             
-            # Step 2: 高機能検索への強制遷移
-            # フレーム切り替えを避け、JavaScriptで直接ページを書き換える
+            # Step 2: 高機能検索への強制遷移（JavaScriptを使用）
             current_step = "2.高機能検索ページへ直接遷移"
             print(f"[Log] {current_step}", flush=True)
             driver.execute_script("location.href='P_A_Select_A.aspx';")
-            time.sleep(5) # 遷移完了を待つ
+            time.sleep(5) 
 
-            # Step 3: 施設選択（このページはフレーム内ではなく直接開いているはず）
+            # Step 3: 施設選択
             current_step = "3.施設(テニス)選択"
             print(f"[Log] {current_step}", flush=True)
-            # ページ内に要素があるか確認
             wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
             
             labels = driver.find_elements(By.TAG_NAME, "label")
@@ -110,7 +108,9 @@ def check_machida_tennis(target_dates):
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for row in rows:
                 if "○" in row.text:
-                    unique_slots.append(f"■ {row.text.replace('\n', ' ').strip()}")
+                    # バックスラッシュ問題を回避するため、一度変数に代入
+                    clean_text = row.text.replace('\n', ' ').strip()
+                    unique_slots.append(f"■ {clean_text}")
 
             res = f"【{date_str}({day_wd})】\n" + ("\n".join(unique_slots) if unique_slots else "空きなし")
             all_results.append(res)
@@ -128,7 +128,7 @@ def check_machida_tennis(target_dates):
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature')
+    signature = request.headers.get('X-Signature', request.headers.get('X-Line-Signature'))
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -141,12 +141,9 @@ def handle_message(event):
     user_msg = event.message.text
     if "今日" not in user_msg and "明日" not in user_msg:
         return
-
     today = datetime.now()
     target_dates = [today] if "今日" in user_msg else [today + timedelta(days=1)]
-    
     result = check_machida_tennis(target_dates)
-    
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
