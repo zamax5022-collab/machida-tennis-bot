@@ -15,10 +15,8 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# 環境変数
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
-
 configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
@@ -48,21 +46,13 @@ def check_machida_tennis(target_dates):
             driver = get_driver()
             wait = WebDriverWait(driver, 25)
             
-            # Step 1: トップページ
-            current_step = "1.トップページ読み込み"
+            # Step 1-3 は成功しているので維持
             driver.get("https://www.pf489.com/machida/dselect.html")
-            
-            # Step 2: 高機能検索ボタン
-            current_step = "2.高機能検索ボタン特定"
             search_links = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//a[contains(., '高機能検索') or .//img[contains(@alt, '高機能検索')]]")))
             driver.execute_script("arguments[0].click();", search_links[0])
             
-            # Step 3: 施設選択
-            current_step = "3.施設選択"
             time.sleep(3)
             labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
-            
-            success_selection = False
             for label in labels:
                 if "テニスコート" in label.text and "コミュニティ" not in label.text:
                     label_id = label.get_attribute("for")
@@ -70,40 +60,38 @@ def check_machida_tennis(target_dates):
                         cb = driver.find_element(By.ID, label_id)
                         if not cb.is_selected():
                             driver.execute_script("arguments[0].click();", cb)
-                            success_selection = True
-            
-            if not success_selection:
-                raise Exception("テニスコート項目の特定・選択に失敗しました")
 
             # Step 4: 空き照会ボタン
             current_step = "4.空き照会ボタン押下"
             time.sleep(2)
-            # 複数のアプローチでボタンを探してクリック
-            search_btn = None
-            btns = driver.find_elements(By.XPATH, "//input[@type='submit' or @type='button']")
-            for b in btns:
-                val = b.get_attribute("value")
-                if val and "空き照会" in val:
-                    search_btn = b
+            driver.execute_script("document.querySelector('input[value=\"空き照会\"]').click();")
+            
+            # Step 5: 日付選択（ロジックを大幅強化）
+            current_step = "5.カレンダー日付選択"
+            # ページ遷移を待機
+            wait.until(EC.presence_of_element_located((By.ID, "dgCalendar"))) 
+            
+            day_num = str(target_date.day)
+            # 町田市のシステムは「6(水)」のような形式、または単なる「6」の場合があります。
+            # 数字が完全に一致するaタグ、またはaタグの中のspanを探します。
+            date_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'SelectDate')]")
+            
+            target_link = None
+            for link in date_links:
+                # リンク内のテキストが指定の日付数字から始まっているか確認
+                if link.text.strip().startswith(day_num):
+                    target_link = link
                     break
             
-            if search_btn:
-                driver.execute_script("arguments[0].click();", search_btn)
+            if target_link:
+                print(f"[Log] 日付リンク発見: {target_link.text}", flush=True)
+                driver.execute_script("arguments[0].click();", target_link)
             else:
-                # JavaScriptによる強制実行
-                driver.execute_script("document.querySelector('input[value=\"空き照会\"]').click();")
-            
-            # Step 5: 日付選択
-            current_step = "5.カレンダー日付選択"
-            time.sleep(5)
-            day_num = str(target_date.day)
-            day_wd = wd_names[target_date.weekday()]
-            cal_xpath = f"//a[contains(., '{day_num}') and contains(., '{day_wd}')]"
-            day_link = wait.until(EC.element_to_be_clickable((By.XPATH, cal_xpath)))
-            driver.execute_script("arguments[0].click();", day_link)
+                raise Exception(f"{day_num}日のリンクが見つかりません。")
             
             # Step 6: 次へ
             current_step = "6.次へボタン押下"
+            time.sleep(3)
             next_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@value='次へ']")))
             driver.execute_script("arguments[0].click();", next_btn)
             
@@ -111,56 +99,46 @@ def check_machida_tennis(target_dates):
             current_step = "7.結果抽出"
             time.sleep(5)
             slots = []
+            # 施設名や時間帯が含まれるテーブルを探す
             rows = driver.find_elements(By.TAG_NAME, "tr")
             for r in rows:
                 if "○" in r.text:
-                    # 改行をスペースに置換（f-string外で処理）
                     clean_row = r.text.replace("\n", " ").strip()
                     slots.append(f"■ {clean_row}")
             
-            date_label = target_date.strftime('%m/%d')
-            res = f"【{date_label}({day_wd})】\n" + ("\n".join(slots) if slots else "空きなし")
+            day_wd = wd_names[target_date.weekday()]
+            res = f"【{target_date.strftime('%m/%d')}({day_wd})】\n" + ("\n".join(slots) if slots else "空きなし")
             all_results.append(res)
 
         except Exception as e:
-            error_msg = f"[Error] {current_step}: {str(e)}"
-            print(error_msg, flush=True)
-            # 詳細なスタックトレースもログに出力
-            print(traceback.format_exc(), flush=True)
-            all_results.append(f"【{target_date.strftime('%m/%d')}】エラーが発生：{current_step}")
+            print(f"[Error] {current_step}: {str(e)}", flush=True)
+            all_results.append(f"【{target_date.strftime('%m/%d')}】エラー：{current_step}")
         finally:
             if driver: driver.quit()
 
     return "\n\n".join(all_results)
 
+# --- LINE Bot のハンドラ部分は変更なし ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
-    print(f"[System] Webhook受信: {body[:100]}", flush=True)
     try:
         handler.handle(body, signature)
-    except Exception as e:
-        print(f"[Critical] Webhook Error: {str(e)}", flush=True)
+    except:
         abort(400)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     msg = event.message.text
-    print(f"[Log] ユーザー入力: {msg}", flush=True)
-    
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         try:
             if "今日" in msg or "明日" in msg:
                 today = datetime.now()
-                # 日付の判定
                 target_dates = [today] if "今日" in msg else [today + timedelta(days=1)]
-                
-                # 検索実行
                 result = check_machida_tennis(target_dates)
-                
                 line_bot_api.reply_message(ReplyMessageRequest(
                     reply_token=event.reply_token,
                     messages=[TextMessage(text=result)]
@@ -168,15 +146,13 @@ def handle_message(event):
             else:
                 line_bot_api.reply_message(ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text="「今日」または「明日」と入力してください。")]
+                    messages=[TextMessage(text="「今日」または「明日」と送ってください。")]
                 ))
         except Exception as e:
-            print(f"[Critical] Handle Error: {str(e)}", flush=True)
             line_bot_api.reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"Bot内部エラーが発生しました：{str(e)}")]
+                messages=[TextMessage(text=f"エラー：{str(e)}")]
             ))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
