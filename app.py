@@ -7,7 +7,7 @@ import threading
 
 app = Flask(__name__)
 
-# LINE設定
+# LINE設定（環境変数はそのまま使用）
 access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
 from linebot.v3 import WebhookHandler
@@ -17,56 +17,60 @@ configuration = Configuration(access_token=access_token)
 handler = WebhookHandler(channel_secret)
 
 def get_machida_tennis_info(target_date):
-    """BS4を使って町田市の空き情報を直接解析する関数"""
+    """セッションを維持しながら町田市の空き情報を解析する"""
     date_str = target_date.strftime('%Y%m%d')
-    # 町田市の空き照会URL（テニスコート等、主要施設を指定したパラメータ付き）
-    url = f"https://www.pf489.com/machida/web/Wg_ShisetsubetsuAkiJoukyou.aspx?S_DATE={date_str}&S_KBN=1&S_SISID=10,11,12,13,14,15,16,17,18,19,20"
-    
+    session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
+        # 1. 玄関（トップページ）にアクセスしてセッションCookieを取得
+        session.get("https://www.pf489.com/machida/web/Wp_TopMenu.aspx", headers=headers, timeout=15)
         
-        # HTMLの解析開始
+        # 2. 空き照会ページへ直接アクセス（施設ID: 10-20番が主要テニスコート）
+        search_url = f"https://www.pf489.com/machida/web/Wg_ShisetsubetsuAkiJoukyou.aspx?S_DATE={date_str}&S_KBN=1&S_SISID=10,11,12,13,14,15,16,17,18,19,20"
+        response = session.get(search_url, headers=headers, timeout=20)
+        
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 施設別テーブルを探す
         results = []
-        # 町田市のシステムは dlJikantai というIDの中に時間帯別の表がある
-        tables = soup.find_all('table', id=lambda x: x and 'dlJikantai' in x)
+
+        # 施設名と空き状況が含まれるテーブルを探す
+        # 町田市のシステムは dlJikantai というIDの中に時間帯別のデータがある
+        jikantai_tables = soup.find_all('table', id=lambda x: x and 'dlJikantai' in x)
         
-        for table in tables:
-            # 施設名を取得（テーブルの少し前にある <a> タグの中身）
-            park_tag = table.find_previous('a', id=lambda x: x and 'LnkSisetu名' in x)
-            park_name = park_tag.get_text(strip=True) if park_tag else "不明な施設"
-            
-            # 時間帯ヘッダー（trの2番目にある）
-            headers_row = table.find_all('tr')[1]
-            time_slots = [th.get_text(strip=True) for th in headers_row.find_all('th')]
-            
-            # 各面（A面、B面など）の行を解析
-            rows = table.find_all('tr')[2:]
+        if not jikantai_tables:
+            # 施設別テーブルが見つからない場合、日別テーブル（dlShisetsu）を試行
+            jikantai_tables = soup.find_all('table', id=lambda x: x and 'dlShisetsu' in x)
+
+        for table in jikantai_tables:
+            # 施設名を探す（テーブルより上にある名前タグ）
+            parent_container = table.find_parent('td')
+            park_name = "テニスコート"
+            if parent_container:
+                name_tag = parent_container.find_previous('a')
+                if name_tag:
+                    park_name = name_tag.get_text(strip=True)
+
+            # 行をループして「○」を探す
+            rows = table.find_all('tr')
             for row in rows:
-                cells = row.find_all('td')
-                if not cells: continue
-                
-                court_name = cells[0].get_text(strip=True)
-                for i, cell in enumerate(cells[1:]):
-                    status = cell.get_text(strip=True)
-                    if '○' in status or '△' in status:
-                        time_range = time_slots[i+1] if (i+1) < len(time_slots) else "時間不明"
-                        results.append(f"📍{park_name}【{court_name}】\n   └ {time_range} ({status})")
+                if '○' in row.text or '△' in row.text:
+                    # 簡易的に空きがある行の内容を抽出
+                    content = row.get_text(separator=' ', strip=True)
+                    # 不要な文字列を除去して整形
+                    clean_content = content.replace('予約', '').replace('選択', '').strip()
+                    results.append(f"📍{park_name}\n   └ {clean_content}")
 
         if not results:
             return f"📅 {target_date.strftime('%m/%d')} は「○」が見つかりませんでした。"
         
-        return f"🎾 {target_date.strftime('%m/%d')} 空き速報！\n\n" + "\n\n".join(list(dict.fromkeys(results))[:15])
+        # 重複を除去して最大15件表示
+        unique_results = list(dict.fromkeys(results))[:15]
+        return f"🎾 {target_date.strftime('%m/%d')} の空き情報を発見しました！\n\n" + "\n\n".join(unique_results)
 
     except Exception as e:
-        return f"⚠️ 解析エラー: {str(e)[:50]}"
+        return f"⚠️ 接続に失敗しました。少し時間を置いて試してください。"
 
 def push_line(user_id, text):
     with ApiClient(configuration) as api_client:
@@ -88,17 +92,25 @@ def handle_message(event):
     msg = event.message.text
     user_id = event.source.user_id
     
-    if "今日" in msg or "明日" in msg:
-        target_date = datetime.now() if "今日" in msg else datetime.now() + timedelta(days=1)
-        
-        # まず返信する
+    if any(k in msg for k in ["今日", "明日", "土曜", "日曜"]):
+        # 日付判定
+        if "明日" in msg:
+            target_date = datetime.now() + timedelta(days=1)
+        elif "土曜" in msg:
+            days_ahead = (5 - datetime.now().weekday()) % 7
+            target_date = datetime.now() + timedelta(days=days_ahead)
+        elif "日曜" in msg:
+            days_ahead = (6 - datetime.now().weekday()) % 7
+            target_date = datetime.now() + timedelta(days=days_ahead)
+        else:
+            target_date = datetime.now()
+            
         with ApiClient(configuration) as api_client:
             MessagingApi(api_client).reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=f"🔍 BS4高速モードで {target_date.strftime('%m/%d')} をスキャン中...")]
+                messages=[TextMessage(text=f"🎾 町田市システムにログインして {target_date.strftime('%m/%d')} を精査中です...")]
             ))
         
-        # 非同期で重い処理を実行
         def task():
             result = get_machida_tennis_info(target_date)
             push_line(user_id, result)
