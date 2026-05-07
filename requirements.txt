@@ -1,5 +1,5 @@
 flask
 line-bot-sdk
-selenium
-webdriver-manager
+requests
+beautifulsoup4
 gunicorn
