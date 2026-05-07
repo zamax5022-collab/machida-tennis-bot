@@ -25,20 +25,19 @@ def get_driver():
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    # メモリ節約設定
     chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--disable-extensions')
-    chrome_options.add_argument('--proxy-server="direct://"')
-    chrome_options.add_argument('--proxy-bypass-list=*')
-    chrome_options.add_argument('--start-maximized')
+    chrome_options.add_argument('--window-size=1280,1024')
     return webdriver.Chrome(options=chrome_options)
 
-def enter_frame(driver):
+def safe_switch_to_frame(driver):
+    """フレームへの切り替えを安全に行う"""
     driver.switch_to.default_content()
     try:
-        WebDriverWait(driver, 15).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
+        # メインフレームが現れるのを最大20秒待機
+        WebDriverWait(driver, 20).until(EC.frame_to_be_available_and_switch_to_it((By.NAME, "MainFrame")))
+        return True
     except:
-        pass
+        return False
 
 def scrap_and_push(user_id, target_date):
     driver = None
@@ -46,67 +45,90 @@ def scrap_and_push(user_id, target_date):
     date_str = target_date.strftime('%Y%m%d')
     try:
         driver = get_driver()
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 25)
         
-        # 1. 画面選択
-        step = "1.入口画面"
+        # 1. サイトアクセス
+        step = "1.入口画面の読み込み"
         driver.get("https://www.pf489.com/machida/dselect.html")
-        enter_frame(driver)
+        time.sleep(3)
+        
+        if not safe_switch_to_frame(driver):
+            raise Exception("メインメニューの読み込みに失敗しました")
+
+        # 高機能検索ボタンをクリック
         btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(., '高機能検索')]")))
         driver.execute_script("arguments[0].click();", btn)
         
         # 2. 条件設定
-        step = "2.条件設定画面"
-        time.sleep(5)
-        enter_frame(driver)
-        labels = wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "label")))
+        step = "2.条件設定画面の遷移待ち"
+        time.sleep(7) # 画面遷移のバッファ
+        
+        # 条件設定画面のフレームに再突入
+        if not safe_switch_to_frame(driver):
+             raise Exception("条件設定画面への切り替えに失敗しました")
+
+        step = "2.テニスコート選択"
+        # チェックボックスが読み込まれるまで待機
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "label")))
+        
+        labels = driver.find_elements(By.TAG_NAME, "label")
+        found = False
         for label in labels:
             if "テニスコート" in label.text and "コミュニティ" not in label.text:
-                cb = driver.find_element(By.ID, label.get_attribute("for"))
+                cb_id = label.get_attribute("for")
+                cb = driver.find_element(By.ID, cb_id)
                 if not cb.is_selected():
                     driver.execute_script("arguments[0].click();", cb)
+                found = True
         
+        if not found:
+            raise Exception("テニスコート選択肢が見つかりませんでした")
+
+        # 空き照会ボタンクリック
         submit_btn = driver.find_element(By.XPATH, "//input[@value='空き照会']")
         driver.execute_script("arguments[0].click();", submit_btn)
 
         # 3. カレンダー画面
-        step = f"3.日付選択({date_str})"
-        time.sleep(5)
-        enter_frame(driver)
-        target_xpath = f"//a[contains(@href, '{date_str}') and (contains(text(), '○') or contains(text(), '△'))]"
+        step = f"3.カレンダー({date_str})のスキャン"
+        time.sleep(7)
+        safe_switch_to_frame(driver)
         
+        target_xpath = f"//a[contains(@href, '{date_str}') and (contains(text(), '○') or contains(text(), '△'))]"
         try:
             link = wait.until(EC.element_to_be_clickable((By.XPATH, target_xpath)))
             driver.execute_script("arguments[0].click();", link)
         except:
-            push_line(user_id, f"📅 {target_date.strftime('%m/%d')}は現在「○/△」がありません。")
+            push_line(user_id, f"📅 {target_date.strftime('%m/%d')}は現在、空きがありません。")
             return
 
-        # 4. 時間帯別空き状況
-        step = "4.詳細解析"
-        time.sleep(5)
-        enter_frame(driver)
-        slots = []
+        # 4. 詳細結果
+        step = "4.施設別詳細の取得"
+        time.sleep(7)
+        safe_switch_to_frame(driver)
+        
+        results = []
         tables = driver.find_elements(By.XPATH, "//table[contains(@id, 'dlJikantai')]")
         for table in tables:
-            park_name = table.find_element(By.XPATH, "./preceding::a[contains(@id, 'LnkSisetu名')][1]").text.strip()
-            rows = table.find_elements(By.XPATH, ".//tr[position()>2]")
-            for row in rows:
-                cells = row.find_elements(By.TAG_NAME, "td")
-                if not cells: continue
-                court = cells[0].text.strip()
-                for i, cell in enumerate(cells[1:], 1):
-                    if "○" in cell.text or "△" in cell.text:
-                        slots.append(f"📍{park_name} {court}")
+            try:
+                park = table.find_element(By.XPATH, "./preceding::a[contains(@id, 'LnkSisetu名')][1]").text.strip()
+                rows = table.find_elements(By.XPATH, ".//tr[position()>2]")
+                for row in rows:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if cells and ("○" in row.text or "△" in row.text):
+                        court = cells[0].text.strip()
+                        results.append(f"📍{park}\n  └ {court}")
+            except:
+                continue
 
-        if slots:
-            msg = f"🎾 {target_date.strftime('%m/%d')} 空きあり！\n" + "\n".join(list(dict.fromkeys(slots))[:10])
+        if results:
+            msg = f"🎾 {target_date.strftime('%m/%d')} 空き速報！\n\n" + "\n".join(list(dict.fromkeys(results))[:15])
         else:
-            msg = f"📅 {target_date.strftime('%m/%d')} 詳細に空きなし"
+            msg = f"📅 {target_date.strftime('%m/%d')} 詳細は埋まっていました。"
+        
         push_line(user_id, msg)
 
     except Exception as e:
-        push_line(user_id, f"⚠️ 中断(Step:{step})\nブラウザの負荷が高すぎました。もう一度試してください。")
+        push_line(user_id, f"⚠️ システム中断\nステップ: {step}\n内容: 町田市のサーバー応答待ちでタイムアウトしました。少し時間を置いて再試行してください。")
     finally:
         if driver:
             driver.quit()
@@ -129,15 +151,18 @@ def callback():
 def handle_message(event):
     text = event.message.text
     user_id = event.source.user_id
-    if "今日" in text or "明日" in text or "05/07" in text:
-        target_date = datetime.now() + timedelta(days=1) # 明日固定（テスト用）
-        # まず即座に応答を返す（これでLINEのタイムアウトを防ぐ）
+    if any(k in text for k in ["今日", "明日", "土曜", "日曜"]):
+        # 日付判定（簡易版）
+        days = 0
+        if "明日" in text: days = 1
+        elif "土曜" in text: days = (5 - datetime.now().weekday()) % 7
+        target_date = datetime.now() + timedelta(days=days)
+        
         with ApiClient(configuration) as api_client:
             MessagingApi(api_client).reply_message(ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text="🎾 町田市システムを軽量モードでスキャンします...")]
+                messages=[TextMessage(text=f"🔍 {target_date.strftime('%m/%d')} を精密スキャンします。1分ほどお待ちください...")]
             ))
-        # 裏側でスキャン開始
         threading.Thread(target=scrap_and_push, args=(user_id, target_date)).start()
 
 if __name__ == "__main__":
